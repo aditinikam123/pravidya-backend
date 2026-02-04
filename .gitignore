@@ -1,0 +1,12 @@
+node_modules/
+.env
+.DS_Store
+*.log
+uploads/*
+!uploads/.gitkeep
+!uploads/training/.gitkeep
+dist/
+
+# Prisma
+prisma/migrations/*
+!prisma/migrations/.gitkeep

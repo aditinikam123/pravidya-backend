@@ -1,0 +1,625 @@
+// Prisma Schema for Admissions Platform
+// PostgreSQL database with Neon compatibility
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User Model (Admin and Counselor)
+model User {
+  id               String            @id @default(cuid())
+  username         String            @unique
+  email            String            @unique
+  password         String
+  role             UserRole          @default(COUNSELOR)
+  isActive         Boolean           @default(true)
+  counselorProfile CounselorProfile?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  // Relations
+  activityLogs    ActivityLog[]
+  trainingContent TrainingContent[]
+  trainingModules TrainingModule[]
+  todos           Todo[]
+  questions       Question[]
+  scores          Score[]
+
+  @@index([role])
+  @@index([isActive])
+  @@map("users")
+}
+
+enum UserRole {
+  ADMIN
+  COUNSELOR
+  MANAGEMENT
+}
+
+// Counselor Profile Model
+model CounselorProfile {
+  id           String       @id @default(cuid())
+  userId       String       @unique
+  fullName     String
+  mobile       String
+  expertise    String[]
+  languages    String[]
+  availability Availability @default(ACTIVE)
+  maxCapacity  Int          @default(50)
+  currentLoad  Int          @default(0)
+  schoolId     String?      // Link to assigned school
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  // Relations
+  user          User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  school        School?             @relation(fields: [schoolId], references: [id], onDelete: SetNull)
+  assignedLeads Lead[]
+  sessions      CounselingSession[]
+  presence      CounselorPresence?
+  trainingProgress TrainingProgress[]
+  trainingAssignments TrainingModuleAssignment[]
+  responses     Response[]
+
+  @@index([availability])
+  @@index([currentLoad])
+  @@index([expertise])
+  @@index([languages])
+  @@index([schoolId])
+  @@map("counselor_profiles")
+}
+
+enum Availability {
+  ACTIVE
+  INACTIVE
+  AWAY
+  OFFLINE
+}
+
+// Institution Model — run add_institution_school_and_course_fields.sql first so boards/grades persist
+model Institution {
+  id                 String           @id @default(cuid())
+  name               String           @unique
+  type               InstitutionType
+  address            String?
+  city               String?
+  state              String?
+  isActive           Boolean          @default(true)
+  boardsOffered      String[]         @default([])
+  standardsAvailable String[]         @default([])
+  streamsOffered     String[]         @default([])
+  admissionsOpen     Boolean?
+  admissionsOpenByStandard Json?      // For schools: {"1-5":true,"6-10":true,"11-12":false} — which grade ranges open (derived)
+  admissionsOpenGrades Json?          // For schools: [1,2,6,7] — which specific grades (1–12) have admissions open
+  admissionsOpenStreams Json?         // For schools: ["Science","Commerce"] — which streams (11–12) have admissions open
+  boardsByStandard   Json?            // e.g. {"1-5":["CBSE"],"6-10":["CBSE","State Board"],"11-12":["CBSE"]}
+  boardGradeMap      Json?            // e.g. {"CBSE":{"primary":[1,2,3],"middle":[6,7],"high":[9,10]}}
+  logoUrl            String?          // Logo image URL for school/college
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  // Relations
+  courses       Course[]
+  leads         Lead[]
+  trainingModules TrainingModule[]
+
+  @@map("institutions")
+}
+
+// School Model (Extended from Institution concept)
+model School {
+  id            String        @id @default(cuid())
+  name          String        @unique
+  board         SchoolBoard
+  city          String
+  state         String
+  academicYear  String
+  contactEmail  String?
+  contactPhone  String?
+  address       String?
+  capacity      Int?         // School capacity
+  isActive      Boolean      @default(true)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  // Relations
+  pockets         SchoolPocket[]
+  counselors      CounselorProfile[]
+  trainingModules TrainingModule[]
+
+  @@index([board])
+  @@index([city, state])
+  @@index([isActive])
+  @@map("schools")
+}
+
+enum SchoolBoard {
+  CBSE
+  ICSE
+  STATE
+  IGCSE
+}
+
+// School Pocket Model (Departments/Programs)
+model SchoolPocket {
+  id          String   @id @default(cuid())
+  schoolId    String
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId])
+  @@map("school_pockets")
+}
+
+enum InstitutionType {
+  School
+  College
+}
+
+// Course Model (add board, standardRange, stream, seats, admissionsOpen after running migration)
+model Course {
+  id            String   @id @default(cuid())
+  name          String
+  code          String?  @unique
+  description   String?
+  institutionId String
+  duration      String?
+  eligibility   String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations
+  institution     Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  leads           Lead[]
+  trainingModules TrainingModule[]
+
+  @@index([institutionId])
+  @@map("courses")
+}
+
+// Lead Model (Parent Submission)
+model Lead {
+  id                      String         @id @default(cuid())
+  leadId                  String?        @unique
+  // Parent Details
+  parentName              String
+  parentMobile            String
+  parentEmail             String
+  parentCity              String
+  preferredLanguage       String
+  // Student Details
+  studentName             String
+  dateOfBirth             DateTime
+  gender                  Gender
+  currentClass            String
+  boardUniversity         String?
+  marksPercentage         Float?
+  // Admission Preferences
+  institutionId           String
+  courseId                String?        // Optional: null when course not found (CRM-style import)
+  importedCourseName      String?        // Excel course name when not in system; show as "CSE (course not available)"
+  academicYear            String
+  preferredCounselingMode CounselingMode?  // Optional: null when blank
+  // Other
+  notes                   String?
+  consent                 Boolean        @default(false)
+  // Assignment & Classification
+  classification          Classification @default(RAW)
+  priority                Priority       @default(NORMAL)
+  assignedCounselorId     String?
+  autoAssigned            Boolean        @default(false)
+  assignmentReason        String         @default("")
+  status                  LeadStatus     @default(NEW)
+  leadSource              String?        // e.g. "College Website"
+  sourceCollege           String?        // College name from external enquiry
+  submittedAt             DateTime       @default(now())
+  updatedAt               DateTime       @updatedAt
+
+  // Relations
+  institution       Institution         @relation(fields: [institutionId], references: [id], onDelete: Restrict)
+  course            Course?             @relation(fields: [courseId], references: [id], onDelete: SetNull)
+  assignedCounselor CounselorProfile?   @relation(fields: [assignedCounselorId], references: [id], onDelete: SetNull)
+  sessions          CounselingSession[]
+  responses         Response[]
+  todos             Todo[]
+
+  @@index([assignedCounselorId])
+  @@index([autoAssigned])
+  @@index([classification])
+  @@index([priority])
+  @@index([status])
+  @@index([submittedAt(sort: Desc)])
+  @@index([parentEmail])
+  @@index([parentMobile])
+  @@index([studentName])  // Performance: for search queries
+  @@index([parentName])   // Performance: for search queries
+  @@index([institutionId])
+  @@index([courseId])
+  @@index([assignedCounselorId, status])
+  @@index([classification, priority])
+  @@index([autoAssigned, assignedCounselorId])
+  @@map("leads")
+}
+
+enum Gender {
+  Male
+  Female
+  Other
+}
+
+enum CounselingMode {
+  Online
+  Offline
+}
+
+enum Classification {
+  RAW
+  VERIFIED
+  PRIORITY
+}
+
+enum Priority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  FOLLOW_UP
+  ENROLLED
+  REJECTED
+  ON_HOLD
+}
+
+// Counseling Session Model
+model CounselingSession {
+  id               String         @id @default(cuid())
+  leadId           String
+  counselorId      String
+  scheduledDate    DateTime
+  mode             CounselingMode
+  status           SessionStatus  @default(SCHEDULED)
+  remarks          String?
+  followUpRequired Boolean        @default(false)
+  followUpDate     DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  // Relations
+  lead      Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  counselor CounselorProfile @relation(fields: [counselorId], references: [id], onDelete: Cascade)
+  responses Response[]
+
+  @@index([leadId])
+  @@index([counselorId])
+  @@map("counseling_sessions")
+}
+
+enum SessionStatus {
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+  RESCHEDULED
+}
+
+// Training Content Model (Legacy - kept for backward compatibility)
+model TrainingContent {
+  id           String      @id @default(cuid())
+  title        String
+  description  String?
+  type         ContentType
+  fileUrl      String?
+  fileName     String?
+  fileSize     Int?
+  mimeType     String?
+  uploadedById String
+  isActive     Boolean     @default(true)
+  viewCount    Int         @default(0)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  // Relations
+  uploadedBy User @relation(fields: [uploadedById], references: [id], onDelete: Cascade)
+
+  @@index([type])
+  @@index([isActive])
+  @@map("training_content")
+}
+
+// Training Module Assignment (Many-to-Many: Module ↔ Counselors)
+model TrainingModuleAssignment {
+  id          String   @id @default(cuid())
+  moduleId    String
+  counselorId String
+  createdAt   DateTime @default(now())
+
+  module    TrainingModule   @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  counselor CounselorProfile @relation(fields: [counselorId], references: [id], onDelete: Cascade)
+
+  @@unique([moduleId, counselorId])
+  @@index([counselorId])
+  @@index([moduleId])
+  @@map("training_module_assignments")
+}
+
+// Training Module Model (Phase-1)
+model TrainingModule {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  contentType ContentType? // VIDEO | PDF | DOCUMENT | EXCEL | PPT | LINK
+  contentUrl  String?  // Unified content URL (links)
+  fileUrl     String?  // Uploaded file URL
+  fileSize    Int?     // File size in bytes
+  thumbnail   String?  // Optional thumbnail for video
+  videoUrl    String?  // Legacy
+  documentUrl String?  // Legacy
+  linkUrl     String?  // Legacy
+  duration    Int?     // Duration in minutes
+  tags        String[]
+  schoolId    String?
+  institutionId String?
+  courseId    String?
+  isPublished Boolean  @default(false)
+  viewsCount  Int      @default(0)
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  school         School?            @relation(fields: [schoolId], references: [id], onDelete: SetNull)
+  institution    Institution?       @relation(fields: [institutionId], references: [id], onDelete: SetNull)
+  course         Course?            @relation(fields: [courseId], references: [id], onDelete: SetNull)
+  createdBy      User               @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  progress       TrainingProgress[]
+  assignments    TrainingModuleAssignment[]
+
+  @@index([isPublished])
+  @@index([schoolId])
+  @@index([institutionId])
+  @@index([courseId])
+  @@index([createdById])
+  @@index([contentType])
+  @@map("training_modules")
+}
+
+// Training Progress Model
+model TrainingProgress {
+  id         String           @id @default(cuid())
+  moduleId   String
+  counselorId String
+  status     TrainingStatus   @default(NOT_STARTED)
+  startedAt  DateTime?
+  completedAt DateTime?
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  // Relations
+  module    TrainingModule    @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  counselor CounselorProfile  @relation(fields: [counselorId], references: [id], onDelete: Cascade)
+
+  @@unique([moduleId, counselorId])
+  @@index([counselorId])
+  @@index([status])
+  @@map("training_progress")
+}
+
+enum TrainingStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum ContentType {
+  VIDEO
+  PDF
+  DOCUMENT
+  EXCEL
+  PPT
+  LINK
+}
+
+// Todo Model
+model Todo {
+  id          String       @id @default(cuid())
+  userId      String
+  leadId      String?
+  title       String
+  description String?
+  priority    TodoPriority @default(MEDIUM)
+  status      TodoStatus   @default(PENDING)
+  dueDate     DateTime?
+  completedAt DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lead Lead? @relation(fields: [leadId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([leadId])
+  @@index([status])
+  @@map("todos")
+}
+
+enum TodoPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum TodoStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+}
+
+// Activity Log Model
+model ActivityLog {
+  id         String     @id @default(cuid())
+  userId     String
+  action     String
+  entityType EntityType
+  entityId   String?
+  details    Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime   @default(now())
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([entityType, entityId])
+  @@map("activity_logs")
+}
+
+enum EntityType {
+  LEAD
+  COUNSELOR
+  INSTITUTION
+  COURSE
+  SESSION
+  TRAINING
+  USER
+  SCHOOL
+  QUESTION
+}
+
+// Counselor Presence Model (Activity Tracking)
+model CounselorPresence {
+  id                String      @id @default(cuid())
+  counselorId       String      @unique
+  lastLoginAt       DateTime?
+  lastActivityAt    DateTime?
+  status            PresenceStatus @default(OFFLINE)
+  activeMinutesToday Int        @default(0)
+  totalActiveMinutes Int        @default(0)
+  lastStatusChange  DateTime    @default(now())
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  counselor CounselorProfile @relation(fields: [counselorId], references: [id], onDelete: Cascade)
+  dailyAttendance DailyAttendance[]
+
+  @@index([status])
+  @@index([lastActivityAt])
+  @@map("counselor_presence")
+}
+
+enum PresenceStatus {
+  ACTIVE
+  AWAY
+  OFFLINE
+}
+
+// Daily Attendance Model
+model DailyAttendance {
+  id            String   @id @default(cuid())
+  counselorId   String
+  presenceId    String
+  date          DateTime @db.Date
+  loginTime     DateTime?
+  logoutTime    DateTime?
+  activeMinutes Int      @default(0)
+  status        AttendanceStatus @default(ABSENT)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations
+  counselor CounselorPresence @relation(fields: [presenceId], references: [id], onDelete: Cascade)
+
+  @@unique([counselorId, date])
+  @@index([date])
+  @@index([status])
+  @@map("daily_attendance")
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  PARTIAL
+}
+
+// Question Model (Q&A System)
+model Question {
+  id          String   @id @default(cuid())
+  text        String
+  description String?
+  category    String?
+  isActive    Boolean  @default(true)
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  createdBy User      @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  responses Response[]
+
+  @@index([isActive])
+  @@index([createdById])
+  @@map("questions")
+}
+
+// Response Model (Counselor responses to questions)
+model Response {
+  id          String   @id @default(cuid())
+  questionId  String
+  counselorId String
+  sessionId   String?  // Optional: link to counseling session
+  leadId     String?   // Optional: link to lead/student
+  answer      String
+  context     Json?    // Additional context data
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  question   Question          @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  counselor  CounselorProfile @relation(fields: [counselorId], references: [id], onDelete: Cascade)
+  session    CounselingSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  lead       Lead?             @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  scores     Score[]
+
+  @@index([counselorId])
+  @@index([questionId])
+  @@index([sessionId])
+  @@index([leadId])
+  @@map("responses")
+}
+
+// Score Model (Scoring system for responses)
+model Score {
+  id         String   @id @default(cuid())
+  responseId String
+  points     Int      @default(0)
+  category   String?  // e.g., "alignment", "quality", "engagement"
+  notes      String?
+  createdById String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  // Relations
+  response  Response @relation(fields: [responseId], references: [id], onDelete: Cascade)
+  createdBy User     @relation(fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([responseId])
+  @@index([createdById])
+  @@map("scores")
+}
