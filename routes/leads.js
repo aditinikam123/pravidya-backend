@@ -2,6 +2,7 @@ import express from 'express';
 import { body, validationResult, query } from 'express-validator';
 import multer from 'multer';
 import ExcelJS from 'exceljs';
+import { Prisma } from '@prisma/client';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { prisma } from '../prisma/client.js';
@@ -225,6 +226,7 @@ router.post('/', [
     preferredCounselingMode: req.body.preferredCounselingMode,
     notes: req.body.notes || null,
     consent: req.body.consent === 'true' || req.body.consent === true,
+    customData: req.body.customData && typeof req.body.customData === 'object' ? req.body.customData : null,
     classification: 'RAW',
     priority: 'NORMAL',
     status: 'NEW'
@@ -263,6 +265,35 @@ router.post('/', [
       leadId: savedLead.leadId
     }
   });
+}));
+
+// @route   GET /api/leads/form-fields
+// @desc    Get admission form field config (public, for AdmissionForm page)
+// @access  Public
+const ADMISSION_REQUIRED_DEFAULT = ['parentName', 'parentMobile', 'parentEmail', 'parentCity', 'preferredLanguage', 'studentName', 'dateOfBirth', 'gender', 'currentClass', 'institution', 'course', 'academicYear', 'preferredCounselingMode'];
+const DEFAULT_ADMISSION_FORM_FIELDS = {
+  parentName: true, parentMobile: true, parentEmail: true, parentCity: true,
+  preferredLanguage: true, studentName: true, dateOfBirth: true, gender: true,
+  currentClass: true, boardUniversity: true, marksPercentage: true,
+  institution: true, course: true, academicYear: true, preferredCounselingMode: true, notes: true,
+  customFields: [],
+  requiredFields: Object.fromEntries(ADMISSION_REQUIRED_DEFAULT.map((k) => [k, true])),
+};
+router.get('/form-fields', asyncHandler(async (req, res) => {
+  let admissionFormFields = { ...DEFAULT_ADMISSION_FORM_FIELDS };
+  try {
+    const rows = await prisma.$queryRaw(Prisma.sql`
+      SELECT "value" FROM "app_settings" WHERE "key" = 'admissionFormFields' LIMIT 1
+    `);
+    const row = Array.isArray(rows) ? rows[0] : null;
+    const value = row?.value;
+    if (value && typeof value === 'object') {
+      admissionFormFields = { ...DEFAULT_ADMISSION_FORM_FIELDS, ...value };
+    }
+  } catch (err) {
+    // Table may not exist yet
+  }
+  res.json({ success: true, data: { admissionFormFields } });
 }));
 
 // @route   GET /api/leads/export-template

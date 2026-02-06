@@ -1,5 +1,6 @@
 import express from 'express';
 import { body, validationResult, query } from 'express-validator';
+import { Prisma } from '@prisma/client';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { prisma } from '../prisma/client.js';
@@ -203,5 +204,125 @@ router.post('/users', [
     data: { user: userWithoutPassword }
   });
 }));
+
+// Default form field configs (all enabled)
+const DEFAULT_COUNSELOR_FIELDS = {
+  username: true, email: true, password: true, fullName: true, mobile: true,
+  expertise: true, languages: true, availability: true, maxCapacity: true, schoolId: true,
+  customFields: [],
+};
+const DEFAULT_INSTITUTION_FIELDS = {
+  name: true, type: true, address: true, city: true, state: true, isActive: true,
+  logoUrl: true, boardsOffered: true, standardsAvailable: true, streamsOffered: true,
+  admissionsOpen: true, boardGradeMap: true, customFields: [],
+};
+const DEFAULT_COURSE_FIELDS = {
+  name: true, code: true, description: true, duration: true, eligibility: true, isActive: true,
+  customFields: [],
+};
+const DEFAULT_SCHOOL_COURSE_FIELDS = {
+  board: true, standardRange: true, stream: true, seats: true, admissionsOpen: true,
+  customFields: [],
+};
+const DEFAULT_SCHOOL_FIELDS = {
+  name: true, type: true, logo: true, boards: true, address: true, city: true, state: true, active: true,
+  customFields: [],
+};
+const DEFAULT_ADMISSION_FORM_FIELDS = {
+  parentName: true, parentMobile: true, parentEmail: true, parentCity: true,
+  preferredLanguage: true, studentName: true, dateOfBirth: true, gender: true,
+  currentClass: true, boardUniversity: true, marksPercentage: true,
+  institution: true, course: true, academicYear: true, preferredCounselingMode: true, notes: true,
+  customFields: [],
+};
+
+const SETTING_KEYS = [
+  { key: 'counselorFields', default: DEFAULT_COUNSELOR_FIELDS },
+  { key: 'institutionFields', default: DEFAULT_INSTITUTION_FIELDS },
+  { key: 'courseFields', default: DEFAULT_COURSE_FIELDS },
+  { key: 'schoolCourseFields', default: DEFAULT_SCHOOL_COURSE_FIELDS },
+  { key: 'schoolFields', default: DEFAULT_SCHOOL_FIELDS },
+  { key: 'admissionFormFields', default: DEFAULT_ADMISSION_FORM_FIELDS },
+];
+
+async function getFormFieldSettings() {
+  const result = {
+    counselorFields: { ...DEFAULT_COUNSELOR_FIELDS },
+    institutionFields: { ...DEFAULT_INSTITUTION_FIELDS },
+    courseFields: { ...DEFAULT_COURSE_FIELDS },
+    schoolCourseFields: { ...DEFAULT_SCHOOL_COURSE_FIELDS },
+    schoolFields: { ...DEFAULT_SCHOOL_FIELDS },
+    admissionFormFields: { ...DEFAULT_ADMISSION_FORM_FIELDS },
+  };
+  try {
+    for (const { key, default: def } of SETTING_KEYS) {
+      const rows = await prisma.$queryRaw(Prisma.sql`
+        SELECT "value" FROM "app_settings" WHERE "key" = ${key} LIMIT 1
+      `);
+      const row = Array.isArray(rows) ? rows[0] : null;
+      const value = row?.value;
+      if (value && typeof value === 'object') {
+        result[key] = { ...def, ...value };
+      }
+    }
+  } catch (err) {
+    // Table may not exist yet
+  }
+  return result;
+}
+
+// @route   GET /api/admin/settings
+// @desc    Get app settings (Admin only)
+// @access  Private (Admin)
+router.get('/settings', asyncHandler(async (req, res) => {
+  const data = await getFormFieldSettings();
+  res.json({ success: true, data });
+}));
+
+// @route   PUT /api/admin/settings
+// @desc    Update app settings (Admin only)
+// @access  Private (Admin)
+router.put('/settings', [
+  body('counselorFields').optional().isObject(),
+  body('institutionFields').optional().isObject(),
+  body('courseFields').optional().isObject(),
+  body('schoolCourseFields').optional().isObject(),
+  body('schoolFields').optional().isObject(),
+  body('admissionFormFields').optional().isObject(),
+], asyncHandler(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+  }
+
+  const updates = {
+    counselorFields: req.body.counselorFields,
+    institutionFields: req.body.institutionFields,
+    courseFields: req.body.courseFields,
+    schoolCourseFields: req.body.schoolCourseFields,
+    schoolFields: req.body.schoolFields,
+    admissionFormFields: req.body.admissionFormFields,
+  };
+
+  for (const { key, default: def } of SETTING_KEYS) {
+    const val = updates[key];
+    if (val && typeof val === 'object') {
+      const value = { ...def, ...val };
+      const valueStr = JSON.stringify(value);
+      const id = `clx_${key.replace(/[A-Z]/g, (c) => c.toLowerCase())}`;
+      const now = new Date();
+      await prisma.$executeRaw(Prisma.sql`
+        INSERT INTO "app_settings" ("id", "key", "value", "updatedAt")
+        VALUES (${id}, ${key}, ${valueStr}::jsonb, ${now})
+        ON CONFLICT ("key") DO UPDATE SET "value" = ${valueStr}::jsonb, "updatedAt" = ${now}
+      `);
+    }
+  }
+
+  const data = await getFormFieldSettings();
+  res.json({ success: true, message: 'Settings updated', data });
+}));
+
+export { getFormFieldSettings };
 
 export default router;

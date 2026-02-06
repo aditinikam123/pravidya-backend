@@ -249,16 +249,38 @@ router.post('/', authenticate, authorize('ADMIN'), [
     eligibility,
     isActive
   };
+  const customData = req.body.customData && typeof req.body.customData === 'object' && Object.keys(req.body.customData).length > 0
+    ? req.body.customData
+    : null;
+  if (customData) courseData.customData = customData;
 
   invalidateCoursesCache();
-  const course = await prisma.course.create({
-    data: courseData,
-    include: {
-      institution: {
-        select: { name: true, type: true }
+  let course;
+  try {
+    course = await prisma.course.create({
+      data: courseData,
+      include: {
+        institution: {
+          select: { name: true, type: true }
+        }
       }
+    });
+  } catch (err) {
+    const msg = String(err?.message ?? '') + (err?.stack ?? '');
+    if (/customData/i.test(msg) || /Unknown argument/i.test(msg)) {
+      delete courseData.customData;
+      course = await prisma.course.create({
+        data: courseData,
+        include: {
+          institution: {
+            select: { name: true, type: true }
+          }
+        }
+      });
+    } else {
+      throw err;
     }
-  });
+  }
 
   // Generate AI training content automatically
   let trainingModules = [];
@@ -348,6 +370,9 @@ router.put('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req, re
   };
   if (req.body.institution) {
     updateData.institutionId = req.body.institution;
+  }
+  if (req.body.customData !== undefined) {
+    updateData.customData = req.body.customData && typeof req.body.customData === 'object' ? req.body.customData : null;
   }
 
   invalidateCoursesCache();

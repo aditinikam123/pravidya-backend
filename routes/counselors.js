@@ -2,10 +2,26 @@ import express from 'express';
 import { body, validationResult, query } from 'express-validator';
 import multer from 'multer';
 import ExcelJS from 'exceljs';
+import { Prisma } from '@prisma/client';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { prisma } from '../prisma/client.js';
 import { hashPassword } from '../utils/password.js';
+import { getFormFieldSettings } from './admin.js';
+
+// Username, Email, Password always required for new accounts
+const COUNSELOR_REQUIRED_ALWAYS = ['username', 'email', 'password'];
+
+// Ensure customData column exists (idempotent - safe to run on every create)
+async function ensureCustomDataColumn() {
+  try {
+    await prisma.$executeRawUnsafe(
+      'ALTER TABLE "counselor_profiles" ADD COLUMN IF NOT EXISTS "customData" JSONB;'
+    );
+  } catch (err) {
+    // Ignore - column may already exist or table may not exist yet
+  }
+}
 
 const router = express.Router();
 
@@ -679,34 +695,90 @@ router.get('/:id', authenticate, asyncHandler(async (req, res) => {
     }
   }
 
+  // Always fetch customData via raw SQL (Prisma client may omit Json fields)
+  let customData = counselor.customData;
+  try {
+    const rows = await prisma.$queryRaw(Prisma.sql`
+      SELECT "customData" FROM "counselor_profiles" WHERE "id" = ${req.params.id} LIMIT 1
+    `);
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (row?.customData != null) customData = row.customData;
+  } catch (err) {
+    // Ignore - column may not exist
+  }
+
   res.json({
     success: true,
-    data: { counselor }
+    data: { counselor: { ...counselor, customData } }
   });
 }));
 
 // @route   POST /api/counselors
-// @desc    Create counselor (Admin only)
+// @desc    Create counselor (Admin only). Validates per Settings (counselorFields).
 // @access  Private (Admin)
 router.post('/', authenticate, authorize('ADMIN'), [
   body('username').trim().notEmpty().withMessage('Username is required'),
   body('email').isEmail().withMessage('Valid email is required'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  body('fullName').trim().notEmpty().withMessage('Full name is required'),
-  body('mobile').trim().notEmpty().withMessage('Mobile number is required'),
-  body('expertise').isArray().withMessage('Expertise must be an array'),
-  body('languages').isArray().withMessage('Languages must be an array')
+  body('fullName').optional().trim(),
+  body('mobile').optional().trim(),
+  body('expertise').optional().isArray(),
+  body('languages').optional().isArray()
 ], asyncHandler(async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
+  const expressErrors = validationResult(req);
+  if (!expressErrors.isEmpty()) {
     return res.status(400).json({
       success: false,
       message: 'Validation failed',
-      errors: errors.array()
+      errors: expressErrors.array()
     });
   }
 
-  const { username, email, password, fullName, mobile, expertise, languages, availability, maxCapacity, schoolId } = req.body;
+  const { username, email, password, fullName, mobile, expertise, languages, availability, maxCapacity, schoolId, customData } = req.body;
+
+  // Fetch form settings and validate only required fields
+  const settings = await getFormFieldSettings();
+  const cfg = settings.counselorFields || {};
+  const requiredWhenShownAlways = ['fullName', 'mobile', 'expertise', 'languages'];
+  const isRequired = (key) => {
+    if (cfg[key] === false) return false; // field hidden in settings
+    if (COUNSELOR_REQUIRED_ALWAYS.includes(key)) return true;
+    if (requiredWhenShownAlways.includes(key)) return true; // always required when shown
+    return cfg.requiredFields?.[key] === true;
+  };
+
+  const validationErrors = [];
+  if (isRequired('fullName') && (!fullName || !String(fullName).trim())) validationErrors.push({ msg: 'Full name is required', path: 'fullName' });
+  if (isRequired('mobile') && (!mobile || !String(mobile).trim())) validationErrors.push({ msg: 'Mobile number is required', path: 'mobile' });
+  if (isRequired('expertise')) {
+    const exp = Array.isArray(expertise) ? expertise : [];
+    if (exp.length === 0) validationErrors.push({ msg: 'At least one expertise is required', path: 'expertise' });
+  }
+  if (isRequired('languages')) {
+    const langs = Array.isArray(languages) ? languages : [];
+    if (langs.length === 0) validationErrors.push({ msg: 'At least one language is required', path: 'languages' });
+  }
+  if (isRequired('schoolId') && !schoolId) validationErrors.push({ msg: 'Assigned school is required', path: 'schoolId' });
+  if (isRequired('availability') && !availability) validationErrors.push({ msg: 'Availability is required', path: 'availability' });
+  if (isRequired('maxCapacity') && (maxCapacity == null || maxCapacity === '' || (parseInt(maxCapacity, 10) || 0) < 1)) validationErrors.push({ msg: 'Max capacity is required', path: 'maxCapacity' });
+
+  if (validationErrors.length > 0) {
+    return res.status(400).json({
+      success: false,
+      message: 'Validation failed',
+      errors: validationErrors
+    });
+  }
+
+  // Use defaults for hidden/optional fields
+  const finalFullName = (cfg.fullName !== false && fullName) ? String(fullName).trim() : 'N/A';
+  const finalMobile = (cfg.mobile !== false && mobile) ? String(mobile).trim() : '';
+  const finalExpertise = (cfg.expertise !== false && Array.isArray(expertise)) ? expertise : [];
+  const finalLanguages = (cfg.languages !== false && Array.isArray(languages)) ? languages : [];
+  const finalSchoolId = (cfg.schoolId !== false && schoolId) ? schoolId : null;
+
+  // Ensure customData column exists before create
+  await ensureCustomDataColumn();
 
   // Check if user already exists
   const existingUser = await prisma.user.findFirst({
@@ -738,13 +810,13 @@ router.post('/', authenticate, authorize('ADMIN'), [
     const counselorProfile = await tx.counselorProfile.create({
       data: {
         userId: user.id,
-        fullName,
-        mobile,
-        expertise: expertise || [],
-        languages: languages || [],
-        availability: availability || 'ACTIVE',
-        maxCapacity: maxCapacity || 50,
-        schoolId: schoolId || null
+        fullName: finalFullName,
+        mobile: finalMobile,
+        expertise: finalExpertise,
+        languages: finalLanguages,
+        availability: (cfg.availability !== false && availability) ? availability : 'ACTIVE',
+        maxCapacity: Math.max(1, parseInt(maxCapacity, 10) || 50),
+        schoolId: finalSchoolId
       },
       include: {
         user: {
@@ -758,6 +830,15 @@ router.post('/', authenticate, authorize('ADMIN'), [
         }
       }
     });
+
+    // Set customData via raw SQL (avoids Prisma Json field issues with older clients)
+    const hasCustomData = customData && typeof customData === 'object' && Object.keys(customData).length > 0;
+    if (hasCustomData) {
+      const valueStr = JSON.stringify(JSON.parse(JSON.stringify(customData)));
+      await tx.$executeRaw(Prisma.sql`
+        UPDATE "counselor_profiles" SET "customData" = ${valueStr}::jsonb WHERE "id" = ${counselorProfile.id}
+      `);
+    }
 
     return counselorProfile;
   });
@@ -784,6 +865,8 @@ router.post('/', authenticate, authorize('ADMIN'), [
 // @desc    Update counselor
 // @access  Private (Admin)
 router.put('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req, res) => {
+  await ensureCustomDataColumn();
+
   const counselor = await prisma.counselorProfile.findUnique({
     where: { id: req.params.id }
   });
@@ -795,15 +878,23 @@ router.put('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req, re
     });
   }
 
-  const allowedFields = ['fullName', 'mobile', 'expertise', 'languages', 'availability', 'maxCapacity', 'schoolId'];
+  const allowedFields = ['fullName', 'mobile', 'expertise', 'languages', 'availability', 'maxCapacity', 'schoolId', 'customData'];
   const updateData = {};
+  let customDataToSet = null;
   Object.keys(req.body).forEach(key => {
     if (allowedFields.includes(key)) {
-      updateData[key] = req.body[key];
+      const val = req.body[key];
+      if (key === 'customData' && val && typeof val === 'object') {
+        customDataToSet = JSON.parse(JSON.stringify(val));
+      } else if (key === 'maxCapacity') {
+        updateData[key] = Math.max(1, parseInt(val, 10) || 50);
+      } else if (key !== 'customData') {
+        updateData[key] = val;
+      }
     }
   });
 
-  const updatedCounselor = await prisma.counselorProfile.update({
+  let updatedCounselor = await prisma.counselorProfile.update({
     where: { id: req.params.id },
     data: updateData,
     include: {
@@ -818,6 +909,21 @@ router.put('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req, re
       }
     }
   });
+
+  // Set customData via raw SQL (avoids Prisma Json field issues)
+  if (customDataToSet !== null) {
+    const valueStr = JSON.stringify(customDataToSet);
+    await prisma.$executeRaw(Prisma.sql`
+      UPDATE "counselor_profiles" SET "customData" = ${valueStr}::jsonb WHERE "id" = ${req.params.id}
+    `);
+    updatedCounselor = await prisma.counselorProfile.findUnique({
+      where: { id: req.params.id },
+      include: {
+        user: { select: { username: true, email: true } },
+        school: { select: { id: true, name: true } }
+      }
+    });
+  }
 
   // Log activity
   await prisma.activityLog.create({
@@ -834,6 +940,45 @@ router.put('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req, re
     success: true,
     message: 'Counselor updated successfully',
     data: { counselor: updatedCounselor }
+  });
+}));
+
+// @route   DELETE /api/counselors/:id
+// @desc    Delete counselor (Admin only)
+// @access  Private (Admin)
+router.delete('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req, res) => {
+  const counselor = await prisma.counselorProfile.findUnique({
+    where: { id: req.params.id },
+    include: { user: { select: { id: true, username: true } } }
+  });
+
+  if (!counselor) {
+    return res.status(404).json({
+      success: false,
+      message: 'Counselor not found'
+    });
+  }
+
+  const userId = counselor.userId;
+
+  await prisma.$transaction(async (tx) => {
+    await tx.counselorProfile.delete({ where: { id: req.params.id } });
+    await tx.user.delete({ where: { id: userId } });
+  });
+
+  await prisma.activityLog.create({
+    data: {
+      userId: req.userId,
+      action: 'DELETE_COUNSELOR',
+      entityType: 'COUNSELOR',
+      entityId: req.params.id,
+      details: { deletedCounselor: counselor.fullName }
+    }
+  });
+
+  res.json({
+    success: true,
+    message: 'Counselor deleted successfully'
   });
 }));
 

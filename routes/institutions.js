@@ -190,8 +190,13 @@ function admissionsOpenByStandardFromGrades(grades) {
 // @desc    Create institution (Admin only)
 // @access  Private (Admin)
 function sanitizeInstitutionPayload(body) {
-  const { type, boardsOffered, standardsAvailable, streamsOffered, admissionsOpen, admissionsOpenByStandard, admissionsOpenGrades, admissionsOpenStreams, boardsByStandard, boardGradeMap } = body;
+  const { type, boardsOffered, standardsAvailable, streamsOffered, admissionsOpen, admissionsOpenByStandard, admissionsOpenGrades, admissionsOpenStreams, boardsByStandard, boardGradeMap, customData } = body;
   const data = { ...body };
+  if (customData !== undefined && customData !== null && typeof customData === 'object' && Object.keys(customData).length > 0) {
+    data.customData = customData;
+  } else {
+    delete data.customData; // Omit empty object; Prisma Json can reject {}
+  }
   if (type === 'College') {
     data.boardsOffered = [];
     data.standardsAvailable = [];
@@ -278,6 +283,11 @@ function withoutBoardGradeMap(data) {
   const { boardGradeMap, ...rest } = data;
   return rest;
 }
+// Payload without customData (use when Prisma/DB rejects empty Json or column missing)
+function withoutCustomData(data) {
+  const { customData, ...rest } = data;
+  return rest;
+}
 
 function isLogoUrlError(err) {
   const msg = String(err?.message || err || '');
@@ -306,6 +316,10 @@ function minimalUpdatePayload(data) {
 function isBoardGradeMapError(err) {
   const msg = String(err?.message ?? err ?? '') + (err?.stack ? String(err.stack) : '');
   return /boardGradeMap/i.test(msg) || /Unknown argument/i.test(msg);
+}
+function isCustomDataError(err) {
+  const msg = String(err?.message ?? err ?? '') + (err?.stack ? String(err.stack) : '');
+  return /customData/i.test(msg) || (msg.includes('Invalid') && msg.includes('institution.create'));
 }
 
 router.post('/', authenticate, authorize('ADMIN'), [
@@ -343,6 +357,8 @@ router.post('/', authenticate, authorize('ADMIN'), [
       institution = await prisma.institution.create({ data: withoutAdmissionsOpenStreams(fullData) });
     } else if (isBoardGradeMapError(err)) {
       institution = await prisma.institution.create({ data: withoutBoardGradeMap(fullData) });
+    } else if (isCustomDataError(err)) {
+      institution = await prisma.institution.create({ data: withoutCustomData(fullData) });
     } else {
       throw err;
     }
@@ -509,26 +525,40 @@ router.delete('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req,
   // Check for related data
   const hasCourses = institution.courses.length > 0;
   const hasLeads = institution.leads.length > 0;
+  const forceDelete = req.query.force === 'true' || req.query.force === true;
 
   if (hasCourses || hasLeads) {
-    return res.status(400).json({
-      success: false,
-      message: 'Cannot delete institution with related courses or leads',
-      details: {
-        courses: institution.courses.length,
-        leads: institution.leads.length
+    if (forceDelete) {
+      // Force delete: remove leads first (courses block deletion - must be deleted separately)
+      if (hasCourses) {
+        return res.status(400).json({
+          success: false,
+          message: 'Cannot delete institution with courses. Delete or reassign courses first.',
+          details: { courses: institution.courses.length, leads: institution.leads.length }
+        });
       }
-    });
+      // Delete leads, then institution
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete institution with related courses or leads',
+        details: {
+          courses: institution.courses.length,
+          leads: institution.leads.length
+        }
+      });
+    }
   }
 
   invalidateInstitutionsCache();
   await prisma.$transaction(async (tx) => {
-    // Delete institution (courses and leads already checked)
+    if (forceDelete && hasLeads) {
+      await tx.lead.deleteMany({ where: { institutionId: req.params.id } });
+    }
     await tx.institution.delete({
       where: { id: req.params.id }
     });
 
-    // Log activity
     await tx.activityLog.create({
       data: {
         userId: req.userId,

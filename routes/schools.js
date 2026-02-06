@@ -68,6 +68,8 @@ router.post('/',
     });
   }
 
+  const customData = req.body.customData && typeof req.body.customData === 'object' ? req.body.customData : null;
+
   // Create school with pockets in transaction
   const school = await prisma.$transaction(async (tx) => {
     const newSchool = await tx.school.create({
@@ -80,7 +82,8 @@ router.post('/',
         contactEmail,
         contactPhone,
         address,
-        capacity
+        capacity,
+        customData
       }
     });
 
@@ -225,7 +228,11 @@ router.put('/:id', authenticate, authorize('ADMIN'), [
     });
   }
 
-  const { pockets, ...updateData } = req.body;
+  const { pockets, customData, ...rest } = req.body;
+  const updateData = { ...rest };
+  if (customData !== undefined) {
+    updateData.customData = customData && typeof customData === 'object' ? customData : null;
+  }
 
   const school = await prisma.$transaction(async (tx) => {
     const updated = await tx.school.update({

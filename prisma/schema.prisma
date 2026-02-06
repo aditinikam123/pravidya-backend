@@ -53,6 +53,7 @@ model CounselorProfile {
   maxCapacity  Int          @default(50)
   currentLoad  Int          @default(0)
   schoolId     String?      // Link to assigned school
+  customData   Json?        // Admin-defined custom fields (e.g. hobby, interests)
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
 
@@ -100,6 +101,7 @@ model Institution {
   boardsByStandard   Json?            // e.g. {"1-5":["CBSE"],"6-10":["CBSE","State Board"],"11-12":["CBSE"]}
   boardGradeMap      Json?            // e.g. {"CBSE":{"primary":[1,2,3],"middle":[6,7],"high":[9,10]}}
   logoUrl            String?          // Logo image URL for school/college
+  customData         Json?            // Admin-defined custom fields
   createdAt          DateTime         @default(now())
   updatedAt          DateTime         @updatedAt
 
@@ -124,6 +126,7 @@ model School {
   address       String?
   capacity      Int?         // School capacity
   isActive      Boolean      @default(true)
+  customData    Json?        // Admin-defined custom fields
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
 
@@ -177,6 +180,7 @@ model Course {
   duration      String?
   eligibility   String?
   isActive      Boolean  @default(true)
+  customData    Json?    // Admin-defined custom fields
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -215,6 +219,7 @@ model Lead {
   // Other
   notes                   String?
   consent                 Boolean        @default(false)
+  customData              Json?          // Admin-defined custom fields from admission form
   // Assignment & Classification
   classification          Classification @default(RAW)
   priority                Priority       @default(NORMAL)
@@ -622,4 +627,14 @@ model Score {
   @@index([responseId])
   @@index([createdById])
   @@map("scores")
+}
+
+// App Settings - Admin-configurable privileges & form fields
+model AppSettings {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json     // JSON value for the setting
+  updatedAt DateTime @updatedAt
+
+  @@map("app_settings")
 }
