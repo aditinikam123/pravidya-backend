@@ -1,28 +1,11 @@
 {
   "name": "admissions-backend",
   "version": "1.0.0",
-<<<<<<< HEAD
   "description": "Pravidya Backend",
-=======
-  "description": "Production-ready MERN admissions platform backend",
-  "main": "api/index.js",
->>>>>>> fd4c3c1 (Added directUrl for Vercel Prisma)
   "type": "module",
 
   "scripts": {
-<<<<<<< HEAD
     "dev": "nodemon server.js",
-=======
-    "start": "node api/index.js",
-    "dev": "nodemon api/index.js",
-    "seed": "node scripts/seedPrisma.js",
-    "seed:settings": "node scripts/seedAppSettings.js",
-    "seed:old": "node scripts/seed.js",
-    "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev",
-    "prisma:studio": "prisma studio",
-    "prisma:push": "prisma db push",
->>>>>>> fd4c3c1 (Added directUrl for Vercel Prisma)
     "build": "prisma generate"
   },
 
@@ -36,29 +19,13 @@
     "express": "^4.22.1",
     "express-validator": "^7.0.1",
     "jsonwebtoken": "^9.0.3",
-    "multer": "^1.4.5-lts.1",
-    "pg": "^8.18.0"
+    "multer": "^1.4.5-lts.1"
   },
 
   "devDependencies": {
     "nodemon": "^3.0.2",
     "prisma": "^5.22.0"
-<<<<<<< HEAD
   }
-=======
-  },
-  "directories": {
-    "doc": "docs"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/aditinikam123/pravidya-backend.git"
-  },
-  "bugs": {
-    "url": "https://github.com/aditinikam123/pravidya-backend/issues"
-  },
-  "homepage": "https://github.com/aditinikam123/pravidya-backend#readme"
->>>>>>> fd4c3c1 (Added directUrl for Vercel Prisma)
 }
 
 
