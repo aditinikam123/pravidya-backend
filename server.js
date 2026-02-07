@@ -200,26 +200,22 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
-// ✅ CORS FIX
 app.use(cors({ origin: "*", credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Static
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.use("/media", express.static(path.join(__dirname, "media")));
 
-// Health Check
 app.get("/api/health", async (req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
-    res.json({ success: true, message: "Server is running" });
+    res.json({ success: true, message: "Backend running 🚀" });
   } catch {
-    res.status(500).json({ success: false, message: "DB connection failed" });
+    res.status(500).json({ success: false, message: "DB failed" });
   }
 });
 
-// Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/leads", leadRoutes);
 app.use("/api/counselors", counselorRoutes);
@@ -236,12 +232,6 @@ app.use("/api/questions", questionRoutes);
 app.use("/api/management", managementRoutes);
 app.use("/api/external", externalRoutes);
 
-// Root
-app.get("/", (req, res) => {
-  res.send("Pravidya Backend Live 🚀");
-});
-
-// 404
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });
