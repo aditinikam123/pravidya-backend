@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "nodemon server.js",
     "vercel-build": "prisma generate && next build",
-    "build": "prisma generate"
+    "build": "prisma generate",
+    "postinstall": "prisma generate"
   },
   "prisma": {
     "generate": "prisma generate --schema=prisma/schema.prisma"
