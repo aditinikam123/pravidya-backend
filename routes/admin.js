@@ -212,13 +212,15 @@ const DEFAULT_COUNSELOR_FIELDS = {
   customFields: [],
 };
 const DEFAULT_INSTITUTION_FIELDS = {
-  name: true, type: true, address: true, city: true, state: true, isActive: true,
+  name: true, type: true, address: true, pincode: true, city: true, state: true, isActive: true,
   logoUrl: true, boardsOffered: true, standardsAvailable: true, streamsOffered: true,
   admissionsOpen: true, boardGradeMap: true, customFields: [],
+  requiredFields: {},
 };
 const DEFAULT_COURSE_FIELDS = {
   name: true, code: true, description: true, duration: true, eligibility: true, isActive: true,
   customFields: [],
+  requiredFields: {},
 };
 const DEFAULT_SCHOOL_COURSE_FIELDS = {
   board: true, standardRange: true, stream: true, seats: true, admissionsOpen: true,

@@ -216,10 +216,11 @@ router.post('/', authenticate, authorize('ADMIN'), [
     });
   }
 
-  let name, code, description, duration, eligibility, isActive;
+  let name, code, degree, description, duration, eligibility, isActive;
   if (institution.type === 'School') {
     name = [req.body.board, req.body.standardRange, req.body.stream].filter(Boolean).join(' ') || 'School entry';
     code = null;
+    degree = null;
     description = null;
     duration = null;
     eligibility = null;
@@ -232,8 +233,16 @@ router.post('/', authenticate, authorize('ADMIN'), [
         errors: [{ msg: 'Course name is required for college' }]
       });
     }
+    if (!(req.body.degree && req.body.degree.trim())) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: [{ msg: 'Degree is required' }]
+      });
+    }
     name = req.body.name.trim();
     code = req.body.code || null;
+    degree = req.body.degree ? req.body.degree.trim() : null;
     description = req.body.description || null;
     duration = req.body.duration || null;
     eligibility = req.body.eligibility || null;
@@ -243,6 +252,7 @@ router.post('/', authenticate, authorize('ADMIN'), [
   const courseData = {
     name,
     code,
+    degree,
     description,
     institutionId: req.body.institution,
     duration,
@@ -337,10 +347,11 @@ router.put('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req, re
   }
 
   const institution = course.institution;
-  let name, code, description, duration, eligibility, isActive;
+  let name, code, degree, description, duration, eligibility, isActive;
   if (institution?.type === 'School') {
     name = [req.body.board, req.body.standardRange, req.body.stream].filter(Boolean).join(' ') || course.name;
     code = null;
+    degree = null;
     description = null;
     duration = null;
     eligibility = null;
@@ -352,8 +363,15 @@ router.put('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req, re
         message: 'Course name is required for college'
       });
     }
+    if (req.body.degree !== undefined && !String(req.body.degree).trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Degree is required'
+      });
+    }
     name = req.body.name !== undefined ? req.body.name.trim() : course.name;
     code = req.body.code !== undefined ? req.body.code : course.code;
+    degree = req.body.degree !== undefined ? (req.body.degree ? String(req.body.degree).trim() : null) : course.degree;
     description = req.body.description !== undefined ? req.body.description : course.description;
     duration = req.body.duration !== undefined ? req.body.duration : course.duration;
     eligibility = req.body.eligibility !== undefined ? req.body.eligibility : course.eligibility;
@@ -363,6 +381,7 @@ router.put('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req, re
   const updateData = {
     name,
     code,
+    degree,
     description,
     duration,
     eligibility,

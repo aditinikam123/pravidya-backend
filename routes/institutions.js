@@ -1,4 +1,5 @@
 import express from 'express';
+import { Prisma } from '@prisma/client';
 import { body, validationResult, query } from 'express-validator';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 import { authenticate, authorize } from '../middleware/auth.js';
@@ -146,7 +147,7 @@ router.get('/:id', asyncHandler(async (req, res) => {
       where: { id: req.params.id },
       include: {
         courses: {
-          select: { id: true, name: true, code: true, description: true, duration: true, eligibility: true, isActive: true }
+          select: { id: true, name: true, code: true, degree: true, description: true, duration: true, eligibility: true, isActive: true }
         }
       }
     });
@@ -192,6 +193,7 @@ function admissionsOpenByStandardFromGrades(grades) {
 function sanitizeInstitutionPayload(body) {
   const { type, boardsOffered, standardsAvailable, streamsOffered, admissionsOpen, admissionsOpenByStandard, admissionsOpenGrades, admissionsOpenStreams, boardsByStandard, boardGradeMap, customData } = body;
   const data = { ...body };
+  delete data.pincode; // Frontend sends pincode for lookup; Institution model has no pincode field
   if (customData !== undefined && customData !== null && typeof customData === 'object' && Object.keys(customData).length > 0) {
     data.customData = customData;
   } else {
@@ -202,11 +204,11 @@ function sanitizeInstitutionPayload(body) {
     data.standardsAvailable = [];
     data.streamsOffered = [];
     data.admissionsOpen = null;
-    data.admissionsOpenByStandard = null;
-    data.admissionsOpenGrades = null;
-    data.admissionsOpenStreams = null;
-    data.boardsByStandard = null;
-    data.boardGradeMap = null;
+    data.admissionsOpenByStandard = Prisma.JsonNull;
+    data.admissionsOpenGrades = Prisma.JsonNull;
+    data.admissionsOpenStreams = Prisma.JsonNull;
+    data.boardsByStandard = Prisma.JsonNull;
+    data.boardGradeMap = Prisma.JsonNull;
   } else {
     data.boardGradeMap = boardGradeMap && typeof boardGradeMap === 'object' ? boardGradeMap : {};
     const map = data.boardGradeMap;
@@ -308,7 +310,7 @@ function isAdmissionsOpenStreamsError(err) {
 // Minimal payload for update when schema/DB is missing optional columns
 function minimalUpdatePayload(data) {
   const {
-    admissionsOpenGrades, admissionsOpenByStandard, admissionsOpenStreams, boardGradeMap, boardsByStandard, logoUrl,
+    admissionsOpenGrades, admissionsOpenByStandard, admissionsOpenStreams, boardGradeMap, boardsByStandard, logoUrl, pincode,
     ...rest
   } = data;
   return rest;
@@ -424,6 +426,7 @@ router.put('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req, re
   }
 
   const fullData = sanitizeInstitutionPayload({ ...req.body, type: req.body.type ?? institution.type });
+  delete fullData.pincode; // Ensure pincode is never sent to Prisma (Institution model has no pincode field)
   const logoError = validateLogoUrlSize(fullData.logoUrl);
   if (logoError) {
     return res.status(400).json({

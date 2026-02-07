@@ -175,6 +175,7 @@ model Course {
   id            String   @id @default(cuid())
   name          String
   code          String?  @unique
+  degree        String?  // e.g., B.E, B.Tech, B.Sc, MBA
   description   String?
   institutionId String
   duration      String?
