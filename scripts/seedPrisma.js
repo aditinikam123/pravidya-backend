@@ -19,22 +19,41 @@ const seedData = async () => {
     await prisma.course.deleteMany({});
     await prisma.institution.deleteMany({});
     await prisma.counselorProfile.deleteMany({});
+    // Training tables that reference User (must delete before User)
+    await prisma.trainingEmbedding.deleteMany({});
+    await prisma.trainingProgress.deleteMany({});
+    await prisma.trainingModuleAssignment.deleteMany({});
+    await prisma.trainingModule.deleteMany({});
     await prisma.user.deleteMany({});
     console.log('✅ Existing data cleared\n');
 
     // Create Admin User
     console.log('Creating admin user...');
-    const adminPassword = await hashPassword('admin123');
+    const adminPassword = await hashPassword('aditi@123');
     const admin = await prisma.user.create({
       data: {
         username: 'admin',
-        email: 'admin@admissions.com',
+        email: 'aditinikam0123@gmail.com',
         password: adminPassword,
         role: 'ADMIN',
         isActive: true
       }
     });
     console.log('✅ Admin created:', admin.username);
+
+    // Create Management User
+    console.log('Creating management user...');
+    const managementPassword = await hashPassword('management123');
+    const management = await prisma.user.create({
+      data: {
+        username: 'management',
+        email: 'management@admissions.com',
+        password: managementPassword,
+        role: 'MANAGEMENT',
+        isActive: true
+      }
+    });
+    console.log('✅ Management created:', management.username);
 
     // Create Institutions
     console.log('\nCreating institutions...');
@@ -129,20 +148,19 @@ const seedData = async () => {
     }
     console.log(`✅ Created ${savedCourses.length} courses`);
 
-    // Create Counselor Users and Profiles
+    // Create Counselor Users and Profiles (each with unique username, email, password)
     console.log('\nCreating counselors...');
-    const counselorPassword = await hashPassword('counselor123');
     const counselors = [
       {
         user: {
           username: 'counselor1',
-          email: 'counselor1@admissions.com',
-          password: counselorPassword,
+          email: 'shrutibalekundri7@gmail.com',
+          password: await hashPassword('shruti@123'),
           role: 'COUNSELOR',
           isActive: true
         },
         profile: {
-          fullName: 'Rajesh Kumar',
+          fullName: 'Rakesh Kumar',
           mobile: '9876543210',
           expertise: ['Computer Science Engineering', 'Information Technology', 'CSE'],
           languages: ['English', 'Hindi', 'Kannada'],
@@ -154,13 +172,13 @@ const seedData = async () => {
       {
         user: {
           username: 'counselor2',
-          email: 'counselor2@admissions.com',
-          password: counselorPassword,
+          email: 'counselor2@vemanacademy.com',
+          password: await hashPassword('Counselor2@123'),
           role: 'COUNSELOR',
           isActive: true
         },
         profile: {
-          fullName: 'Priya Sharma',
+          fullName: 'Counselor 2',
           mobile: '9876543211',
           expertise: ['Mechanical Engineering', 'ECE'],
           languages: ['English', 'Hindi', 'Marathi'],
@@ -172,13 +190,13 @@ const seedData = async () => {
       {
         user: {
           username: 'counselor3',
-          email: 'counselor3@admissions.com',
-          password: counselorPassword,
+          email: 'counselor3@vemanacademy.com',
+          password: await hashPassword('Counselor3@123'),
           role: 'COUNSELOR',
           isActive: true
         },
         profile: {
-          fullName: 'Amit Patel',
+          fullName: 'Counselor 3',
           mobile: '9876543212',
           expertise: ['Computer Science Engineering', 'CSE', 'IT'],
           languages: ['English', 'Hindi', 'Gujarati'],
@@ -190,8 +208,8 @@ const seedData = async () => {
       {
         user: {
           username: 'counselor4',
-          email: 'counselor4@admissions.com',
-          password: counselorPassword,
+          email: 'counselor4@vemanacademy.com',
+          password: await hashPassword('Counselor4@123'),
           role: 'COUNSELOR',
           isActive: true
         },
@@ -245,7 +263,7 @@ const seedData = async () => {
         preferredCounselingMode: 'Online',
         notes: 'Interested in CSE program. Good academic record.',
         consent: true,
-        classification: 'RAW',
+        classification: 'NEW',
         priority: 'NORMAL',
         status: 'NEW'
       },
@@ -267,7 +285,7 @@ const seedData = async () => {
         preferredCounselingMode: 'Offline',
         notes: 'Looking for school admission',
         consent: true,
-        classification: 'VERIFIED',
+        classification: 'COUNSELING_IN_PROGRESS',
         priority: 'HIGH',
         status: 'CONTACTED'
       },
@@ -289,7 +307,7 @@ const seedData = async () => {
         preferredCounselingMode: 'Online',
         notes: 'Interested in Electronics and Communication',
         consent: true,
-        classification: 'RAW',
+        classification: 'NEW',
         priority: 'NORMAL',
         status: 'NEW'
       },
@@ -333,7 +351,7 @@ const seedData = async () => {
         preferredCounselingMode: 'Online',
         notes: 'Interested in IT program',
         consent: true,
-        classification: 'RAW',
+        classification: 'NEW',
         priority: 'NORMAL',
         status: 'NEW'
       },
@@ -355,7 +373,7 @@ const seedData = async () => {
         preferredCounselingMode: 'Online',
         notes: 'School admission enquiry',
         consent: true,
-        classification: 'VERIFIED',
+        classification: 'COUNSELING_IN_PROGRESS',
         priority: 'NORMAL',
         status: 'CONTACTED'
       },
@@ -377,7 +395,7 @@ const seedData = async () => {
         preferredCounselingMode: 'Offline',
         notes: 'Interested in Mechanical Engineering',
         consent: true,
-        classification: 'RAW',
+        classification: 'NEW',
         priority: 'NORMAL',
         status: 'NEW'
       },
@@ -452,15 +470,24 @@ const seedData = async () => {
     console.log(`   - ${createdLeads.length - assignedCount} leads unassigned`);
 
     console.log('\n✅ Seed data created successfully!');
-    console.log('\n📋 Login Credentials:');
+    console.log('\n📋 Login Credentials (each counselor has unique username, email, password):');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('Admin:');
     console.log('  Username: admin');
-    console.log('  Password: admin123');
-    console.log('  Email: admin@admissions.com');
-    console.log('\nCounselors:');
-    console.log('  Usernames: counselor1, counselor2, counselor3, counselor4');
-    console.log('  Password: counselor123');
+    console.log('  Email: aditinikam0123@gmail.com');
+    console.log('  Password: aditi@123');
+    console.log('\nManagement:');
+    console.log('  Username: management');
+    console.log('  Email: management@admissions.com');
+    console.log('  Password: management123');
+    console.log('\nCounselors (each has different credentials):');
+    const counselorCreds = [
+      { username: 'counselor1', email: 'shrutibalekundri7@gmail.com', password: 'shruti@123' },
+      { username: 'counselor2', email: 'counselor2@vemanacademy.com', password: 'Counselor2@123' },
+      { username: 'counselor3', email: 'counselor3@vemanacademy.com', password: 'Counselor3@123' },
+      { username: 'counselor4', email: 'counselor4@vemanacademy.com', password: 'Counselor4@123' },
+    ];
+    counselorCreds.forEach((c, i) => console.log(`  ${i + 1}. ${c.username} | ${c.email} | ${c.password}`));
     console.log('\n📊 Sample Data:');
     console.log(`  Institutions: ${savedInstitutions.length}`);
     console.log(`  Courses: ${savedCourses.length}`);

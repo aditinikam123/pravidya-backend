@@ -4,6 +4,7 @@ import { asyncHandler } from '../middleware/asyncHandler.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { prisma } from '../prisma/client.js';
 import upload from '../middleware/upload.js';
+import { embedTrainingModule } from '../services/trainingEmbeddings.js';
 
 const router = express.Router();
 
@@ -159,6 +160,12 @@ router.post('/', authenticate, authorize('ADMIN'), upload.single('file'), [
       details: { title, contentType: module.contentType || contentType }
     }
   });
+
+  if (process.env.GEMINI_API_KEY) {
+    embedTrainingModule(module.id).catch((err) =>
+      console.error('Training embedding failed for module', module.id, err?.message)
+    );
+  }
 
   res.status(201).json({
     success: true,
@@ -332,6 +339,13 @@ router.put('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req, re
       _count: { select: { assignments: true } }
     }
   });
+
+  if (process.env.GEMINI_API_KEY) {
+    embedTrainingModule(req.params.id).catch((err) =>
+      console.error('Training embedding failed on update', req.params.id, err?.message)
+    );
+  }
+
   res.json({ success: true, data: updated });
 }));
 

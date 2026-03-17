@@ -1,9 +1,11 @@
 import express from 'express';
+import { Prisma } from '@prisma/client';
 import { body, validationResult, query } from 'express-validator';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { prisma } from '../prisma/client.js';
 import { generateTrainingForCourse } from '../services/aiTrainingGenerator.js';
+import { invalidateInstitutionsCache } from './institutions.js';
 
 const router = express.Router();
 
@@ -142,6 +144,39 @@ router.get('/', [
   res.json(payload);
 }));
 
+// @route   PATCH /api/courses/:id/admissions-open
+// @desc    Update only admissionsOpen for a course (Admin only). Must be before /:id to avoid route conflict.
+// @access  Private (Admin)
+router.patch('/:id/admissions-open', authenticate, authorize('ADMIN'), asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const val = req.body.admissionsOpen;
+  const admissionsOpen = val === true || val === 'true';
+  const exists = await prisma.course.findUnique({ where: { id }, select: { id: true } });
+  if (!exists) {
+    return res.status(404).json({ success: false, message: 'Course not found' });
+  }
+  try {
+    await prisma.$executeRaw(Prisma.sql`UPDATE courses SET "admissionsOpen" = ${admissionsOpen} WHERE id = ${id}`);
+  } catch (err) {
+    const msg = String(err?.message || '');
+    if (msg.includes('admissionsOpen') || msg.includes('column') || msg.includes('does not exist')) {
+      await prisma.$executeRawUnsafe(
+        `ALTER TABLE courses ADD COLUMN IF NOT EXISTS "admissionsOpen" BOOLEAN;`
+      );
+      await prisma.$executeRaw(Prisma.sql`UPDATE courses SET "admissionsOpen" = ${admissionsOpen} WHERE id = ${id}`);
+    } else {
+      throw err;
+    }
+  }
+  invalidateCoursesCache();
+  invalidateInstitutionsCache(); // Institutions include courses, so refresh their cache
+  const updated = await prisma.course.findUnique({
+    where: { id },
+    include: { institution: { select: { name: true, type: true } } },
+  });
+  res.json({ success: true, message: 'Admissions status updated', data: { course: updated } });
+}));
+
 // @route   GET /api/courses/:id
 // @desc    Get single course
 // @access  Public
@@ -216,10 +251,11 @@ router.post('/', authenticate, authorize('ADMIN'), [
     });
   }
 
-  let name, code, description, duration, eligibility, isActive;
+  let name, code, degree, description, duration, eligibility, isActive;
   if (institution.type === 'School') {
     name = [req.body.board, req.body.standardRange, req.body.stream].filter(Boolean).join(' ') || 'School entry';
     code = null;
+    degree = null;
     description = null;
     duration = null;
     eligibility = null;
@@ -232,8 +268,16 @@ router.post('/', authenticate, authorize('ADMIN'), [
         errors: [{ msg: 'Course name is required for college' }]
       });
     }
+    if (!(req.body.degree && req.body.degree.trim())) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: [{ msg: 'Degree is required' }]
+      });
+    }
     name = req.body.name.trim();
     code = req.body.code || null;
+    degree = req.body.degree ? req.body.degree.trim() : null;
     description = req.body.description || null;
     duration = req.body.duration || null;
     eligibility = req.body.eligibility || null;
@@ -243,6 +287,7 @@ router.post('/', authenticate, authorize('ADMIN'), [
   const courseData = {
     name,
     code,
+    degree,
     description,
     institutionId: req.body.institution,
     duration,
@@ -337,10 +382,11 @@ router.put('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req, re
   }
 
   const institution = course.institution;
-  let name, code, description, duration, eligibility, isActive;
+  let name, code, degree, description, duration, eligibility, isActive;
   if (institution?.type === 'School') {
     name = [req.body.board, req.body.standardRange, req.body.stream].filter(Boolean).join(' ') || course.name;
     code = null;
+    degree = null;
     description = null;
     duration = null;
     eligibility = null;
@@ -352,8 +398,15 @@ router.put('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req, re
         message: 'Course name is required for college'
       });
     }
+    if (req.body.degree !== undefined && !String(req.body.degree).trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Degree is required'
+      });
+    }
     name = req.body.name !== undefined ? req.body.name.trim() : course.name;
     code = req.body.code !== undefined ? req.body.code : course.code;
+    degree = req.body.degree !== undefined ? (req.body.degree ? String(req.body.degree).trim() : null) : course.degree;
     description = req.body.description !== undefined ? req.body.description : course.description;
     duration = req.body.duration !== undefined ? req.body.duration : course.duration;
     eligibility = req.body.eligibility !== undefined ? req.body.eligibility : course.eligibility;
@@ -363,6 +416,7 @@ router.put('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req, re
   const updateData = {
     name,
     code,
+    degree,
     description,
     duration,
     eligibility,
@@ -373,6 +427,9 @@ router.put('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req, re
   }
   if (req.body.customData !== undefined) {
     updateData.customData = req.body.customData && typeof req.body.customData === 'object' ? req.body.customData : null;
+  }
+  if (req.body.admissionsOpen !== undefined) {
+    updateData.admissionsOpen = req.body.admissionsOpen === true || req.body.admissionsOpen === 'true';
   }
 
   invalidateCoursesCache();

@@ -33,25 +33,25 @@
    ```bash
    npm run dev
    ```
-   Server runs on `http://localhost:5000`
+   Server runs on `http://localhost:8000`
 
 ## Verify Installation
 
 1. Check health endpoint:
    ```bash
-   curl http://localhost:5000/api/health
+   curl http://localhost:8000/api/health
    ```
 
 2. Test login:
    ```bash
-   curl -X POST http://localhost:5000/api/auth/login \
+   curl -X POST http://localhost:8000/api/auth/login \
      -H "Content-Type: application/json" \
      -d '{"username":"admin","password":"admin123"}'
    ```
 
 ## API Base URL
 ```
-http://localhost:5000/api
+http://localhost:8000/api
 ```
 
 ## Next Steps

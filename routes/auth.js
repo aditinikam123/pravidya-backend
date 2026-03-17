@@ -1,7 +1,7 @@
 import express from 'express';
 import { body, validationResult } from 'express-validator';
 import { asyncHandler } from '../middleware/asyncHandler.js';
-import { authenticate, authorize } from '../middleware/auth.js';
+import { authenticate, authenticateMe, authorize } from '../middleware/auth.js';
 import { generateToken } from '../utils/jwt.js';
 import { comparePassword, hashPassword } from '../utils/password.js';
 import { prisma } from '../prisma/client.js';
@@ -186,34 +186,95 @@ router.post('/admin/login', [
   });
 }));
 
-// @route   GET /api/auth/me
-// @desc    Get current user
-// @access  Private
-router.get('/me', authenticate, asyncHandler(async (req, res) => {
-  const user = await prisma.user.findUnique({
-    where: { id: req.userId },
-    include: {
-      counselorProfile: true
-    }
-  });
-
-  if (!user) {
-    return res.status(404).json({
+// @route   POST /api/auth/management/login
+// @desc    Management login (lean endpoint, no counselorProfile, async activity log)
+// @access  Public
+router.post('/management/login', [
+  body('username').trim().notEmpty().withMessage('Username is required'),
+  body('password').notEmpty().withMessage('Password is required')
+], asyncHandler(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({
       success: false,
-      message: 'User not found'
+      message: 'Validation failed',
+      errors: errors.array()
     });
   }
 
-  const { password: _, ...userWithoutPassword } = user;
+  const { username, password } = req.body;
+
+  const user = await prisma.user.findFirst({
+    where: {
+      OR: [{ username }, { email: username }],
+      role: 'MANAGEMENT'
+    }
+    // No include - management users don't need counselorProfile
+  });
+
+  if (!user) {
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid credentials'
+    });
+  }
+
+  if (!user.isActive) {
+    return res.status(401).json({
+      success: false,
+      message: 'Account is inactive. Please contact administrator.'
+    });
+  }
+
+  const isPasswordValid = await comparePassword(password, user.password);
+  if (!isPasswordValid) {
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid credentials'
+    });
+  }
+
+  const token = generateToken(user.id, user.role);
+
+  // Log activity in background so response returns immediately
+  const ip = req.ip || req.connection?.remoteAddress;
+  const ua = req.get('user-agent');
+  prisma.activityLog.create({
+    data: {
+      userId: user.id,
+      action: 'LOGIN',
+      entityType: 'USER',
+      entityId: user.id,
+      ipAddress: ip,
+      userAgent: ua
+    }
+  }).catch((err) => console.error('Activity log write failed:', err));
+
+  const { password: _p, ...userWithoutPassword } = user;
 
   res.json({
     success: true,
+    message: 'Login successful',
     data: {
+      token,
       user: {
         ...userWithoutPassword,
-        isAdmin: user.role === 'ADMIN',
-        isCounselor: user.role === 'COUNSELOR'
+        isAdmin: false,
+        isCounselor: false,
+        isManagement: true
       }
+    }
+  });
+}));
+
+// @route   GET /api/auth/me
+// @desc    Get current user (main app or Pravidya academy user)
+// @access  Private
+router.get('/me', authenticateMe, asyncHandler(async (req, res) => {
+  res.json({
+    success: true,
+    data: {
+      user: req.user
     }
   });
 }));

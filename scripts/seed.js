@@ -28,8 +28,8 @@ const seedData = async () => {
     console.log('Creating admin user...');
     const admin = new User({
       username: 'admin',
-      email: 'admin@admissions.com',
-      password: 'admin123',
+      email: 'aditinikam0123@gmail.com',
+      password: 'aditi@123',
       role: 'ADMIN',
       isActive: true
     });
@@ -133,8 +133,8 @@ const seedData = async () => {
       {
         user: {
           username: 'counselor1',
-          email: 'counselor1@admissions.com',
-          password: 'counselor123',
+          email: 'shrutibalekundri7@gmail.com',
+          password: 'shruti@123',
           role: 'COUNSELOR',
           isActive: true
         },
@@ -312,7 +312,7 @@ const seedData = async () => {
     console.log('\n📋 Login Credentials:');
     console.log('Admin:');
     console.log('  Username: admin');
-    console.log('  Password: admin123');
+    console.log('  Password: aditi@123');
     console.log('\nCounselors:');
     console.log('  Username: counselor1, counselor2, counselor3, counselor4');
     console.log('  Password: counselor123');

@@ -1,4 +1,5 @@
 import express from 'express';
+import { Prisma } from '@prisma/client';
 import { body, validationResult, query } from 'express-validator';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 import { authenticate, authorize } from '../middleware/auth.js';
@@ -9,7 +10,7 @@ const router = express.Router();
 // In-memory cache for active institutions list (heavy dropdown data)
 let institutionsCache = null;
 
-function invalidateInstitutionsCache() {
+export function invalidateInstitutionsCache() {
   institutionsCache = null;
 }
 
@@ -20,10 +21,10 @@ router.get('/', [
   query('type').optional().isIn(['School', 'College']),
   query('isActive').optional().isIn(['true', 'false']),
   query('page').optional().isInt({ min: 1 }),
-  query('limit').optional().isInt({ min: 1, max: 100 })
+  query('limit').optional().isInt({ min: 1, max: 500 })
 ], asyncHandler(async (req, res) => {
   const page = parseInt(req.query.page) || 1;
-  const limit = parseInt(req.query.limit) || 100;
+  const limit = Math.min(parseInt(req.query.limit) || 100, 500);
   const skip = (page - 1) * limit;
   const { type, isActive, search } = req.query;
   const where = {};
@@ -34,8 +35,9 @@ router.get('/', [
     where.name = { contains: search, mode: 'insensitive' };
   }
 
-  // Use cache only for first page of active institutions, no search (dropdown use)
-  const useCache = !search && (isActive === 'true' || isActive === undefined) && page === 1 && limit >= 50;
+  // Use cache only for first page of active institutions, no search, no type filter (dropdown use).
+  // When type=School or type=College (e.g. counselor Admissions Available), never use cache so correct data is returned.
+  const useCache = !search && !type && (isActive === 'true' || isActive === undefined) && page === 1 && limit >= 50;
   if (useCache && institutionsCache) {
     return res.json(institutionsCache);
   }
@@ -58,7 +60,7 @@ router.get('/', [
     boardsByStandard: true,
     boardGradeMap: true,
     logoUrl: true,
-    courses: { select: { id: true, name: true, code: true, isActive: true } },
+    courses: { select: { id: true, name: true, code: true, isActive: true, admissionsOpen: true } },
     leads: { select: { id: true } }
   };
   const minimalSelect = {
@@ -71,6 +73,7 @@ router.get('/', [
     isActive: true,
     courses: { select: { id: true, name: true, code: true, isActive: true } }
   };
+  const bareMinimumSelect = { id: true, name: true, type: true, isActive: true };
 
   let institutions, total;
   try {
@@ -87,8 +90,7 @@ router.get('/', [
     institutions = list;
     total = cnt;
   } catch (err) {
-    const msg = String(err?.message || err || '');
-    if (msg.includes('boardsOffered') || msg.includes('does not exist') || msg.includes('column')) {
+    try {
       const [list, cnt] = await Promise.all([
         prisma.institution.findMany({
           where,
@@ -101,8 +103,19 @@ router.get('/', [
       ]);
       institutions = list;
       total = cnt;
-    } else {
-      throw err;
+    } catch (err2) {
+      const [list, cnt] = await Promise.all([
+        prisma.institution.findMany({
+          where,
+          select: bareMinimumSelect,
+          orderBy: { name: 'asc' },
+          skip,
+          take: limit
+        }),
+        prisma.institution.count({ where })
+      ]);
+      institutions = list;
+      total = cnt;
     }
   }
 
@@ -115,7 +128,7 @@ router.get('/', [
       totalPages: Math.ceil(total / limit)
     }
   };
-  if (useCache) {
+  if (useCache && !type) {
     institutionsCache = payload;
   }
   res.json(payload);
@@ -146,7 +159,7 @@ router.get('/:id', asyncHandler(async (req, res) => {
       where: { id: req.params.id },
       include: {
         courses: {
-          select: { id: true, name: true, code: true, description: true, duration: true, eligibility: true, isActive: true }
+          select: { id: true, name: true, code: true, degree: true, description: true, duration: true, eligibility: true, isActive: true }
         }
       }
     });
@@ -192,6 +205,7 @@ function admissionsOpenByStandardFromGrades(grades) {
 function sanitizeInstitutionPayload(body) {
   const { type, boardsOffered, standardsAvailable, streamsOffered, admissionsOpen, admissionsOpenByStandard, admissionsOpenGrades, admissionsOpenStreams, boardsByStandard, boardGradeMap, customData } = body;
   const data = { ...body };
+  delete data.pincode; // Frontend sends pincode for lookup; Institution model has no pincode field
   if (customData !== undefined && customData !== null && typeof customData === 'object' && Object.keys(customData).length > 0) {
     data.customData = customData;
   } else {
@@ -202,11 +216,11 @@ function sanitizeInstitutionPayload(body) {
     data.standardsAvailable = [];
     data.streamsOffered = [];
     data.admissionsOpen = null;
-    data.admissionsOpenByStandard = null;
-    data.admissionsOpenGrades = null;
-    data.admissionsOpenStreams = null;
-    data.boardsByStandard = null;
-    data.boardGradeMap = null;
+    data.admissionsOpenByStandard = Prisma.JsonNull;
+    data.admissionsOpenGrades = Prisma.JsonNull;
+    data.admissionsOpenStreams = Prisma.JsonNull;
+    data.boardsByStandard = Prisma.JsonNull;
+    data.boardGradeMap = Prisma.JsonNull;
   } else {
     data.boardGradeMap = boardGradeMap && typeof boardGradeMap === 'object' ? boardGradeMap : {};
     const map = data.boardGradeMap;
@@ -308,7 +322,7 @@ function isAdmissionsOpenStreamsError(err) {
 // Minimal payload for update when schema/DB is missing optional columns
 function minimalUpdatePayload(data) {
   const {
-    admissionsOpenGrades, admissionsOpenByStandard, admissionsOpenStreams, boardGradeMap, boardsByStandard, logoUrl,
+    admissionsOpenGrades, admissionsOpenByStandard, admissionsOpenStreams, boardGradeMap, boardsByStandard, logoUrl, pincode,
     ...rest
   } = data;
   return rest;
@@ -424,6 +438,7 @@ router.put('/:id', authenticate, authorize('ADMIN'), asyncHandler(async (req, re
   }
 
   const fullData = sanitizeInstitutionPayload({ ...req.body, type: req.body.type ?? institution.type });
+  delete fullData.pincode; // Ensure pincode is never sent to Prisma (Institution model has no pincode field)
   const logoError = validateLogoUrlSize(fullData.logoUrl);
   if (logoError) {
     return res.status(400).json({

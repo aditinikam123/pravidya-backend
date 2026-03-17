@@ -4,8 +4,11 @@ import { asyncHandler } from '../middleware/asyncHandler.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { prisma } from '../prisma/client.js';
 import * as presenceService from '../services/presenceTracking.js';
+import managementAnalyticsRoutes from './managementAnalytics.js';
 
 const router = express.Router();
+
+router.use('/analytics', managementAnalyticsRoutes);
 
 // @route   GET /api/management/dashboard
 // @desc    Get management dashboard overview

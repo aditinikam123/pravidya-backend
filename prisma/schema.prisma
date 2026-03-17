@@ -2,7 +2,8 @@
 // PostgreSQL database with Neon compatibility
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native"]
 }
 
 datasource db {
@@ -10,7 +11,7 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// User Model (Admin and Counselor)
+// User Model (Admin, Counselor, Management) - scoped to institution when institutionId is set
 model User {
   id               String            @id @default(cuid())
   username         String            @unique
@@ -18,20 +19,26 @@ model User {
   password         String
   role             UserRole          @default(COUNSELOR)
   isActive         Boolean           @default(true)
+  institutionId    String?           // Institution scope - null = legacy/global
   counselorProfile CounselorProfile?
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
 
   // Relations
+  institution     Institution?      @relation(fields: [institutionId], references: [id], onDelete: SetNull)
   activityLogs    ActivityLog[]
   trainingContent TrainingContent[]
   trainingModules TrainingModule[]
   todos           Todo[]
   questions       Question[]
   scores          Score[]
+  historicalFilesUploaded HistoricalFile[]
+  historicalUploadsUploaded HistoricalUpload[] @relation("HistoricalUploadsUploaded")
+  historicalUploadsVerified HistoricalUpload[]  @relation("HistoricalUploadsVerified")
 
   @@index([role])
   @@index([isActive])
+  @@index([institutionId])
   @@map("users")
 }
 
@@ -52,10 +59,11 @@ model CounselorProfile {
   availability Availability @default(ACTIVE)
   maxCapacity  Int          @default(50)
   currentLoad  Int          @default(0)
-  schoolId     String?      // Link to assigned school
-  customData   Json?        // Admin-defined custom fields (e.g. hobby, interests)
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
+  schoolId        String?   // Link to assigned school
+  customData      Json?     // Admin-defined custom fields (e.g. hobby, interests)
+  staticMeetLink  String?   // Counselor's reusable Google Meet link (no Google API)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   // Relations
   user          User                @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -66,6 +74,9 @@ model CounselorProfile {
   trainingProgress TrainingProgress[]
   trainingAssignments TrainingModuleAssignment[]
   responses     Response[]
+  callLogs      CallLog[]
+  leadCalls     LeadCall[]
+  parentFeedback ParentFeedback[]
 
   @@index([availability])
   @@index([currentLoad])
@@ -82,11 +93,20 @@ enum Availability {
   OFFLINE
 }
 
+// Lead assignment configuration modes (language, round robin, skill, performance)
+enum LeadAssignmentMode {
+  language
+  round_robin
+  skill
+  performance
+}
+
 // Institution Model — run add_institution_school_and_course_fields.sql first so boards/grades persist
 model Institution {
-  id                 String           @id @default(cuid())
-  name               String           @unique
-  type               InstitutionType
+  id                   String           @id @default(cuid())
+  jitofyInstitutionId   String?          @unique // External ID from Jitofy platform - links to hosting ecosystem
+  name                 String           @unique
+  type                 InstitutionType
   address            String?
   city               String?
   state              String?
@@ -109,8 +129,35 @@ model Institution {
   courses       Course[]
   leads         Lead[]
   trainingModules TrainingModule[]
+  historicalFiles HistoricalFile[]
+  historicalAdmissions HistoricalAdmission[]
+  historicalMarketingRecords HistoricalMarketingRecord[]
+  parentFeedback  ParentFeedback[]
+  historicalUploads HistoricalUpload[]
+  users         User[]
+  superAdmins  SuperAdmin[]
 
+  @@index([jitofyInstitutionId])
   @@map("institutions")
+}
+
+// Super Admin Model - institution-level (Platform institution has jitofyInstitutionId='PLATFORM')
+model SuperAdmin {
+  id            String   @id @default(cuid())
+  institutionId String
+  email         String
+  passwordHash  String
+  fullName      String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  institution Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  @@unique([institutionId, email])
+  @@index([institutionId])
+  @@index([email])
+  @@map("super_admins")
 }
 
 // School Model (Extended from Institution concept)
@@ -175,19 +222,22 @@ model Course {
   id            String   @id @default(cuid())
   name          String
   code          String?  @unique
+  degree        String?  // e.g., B.E, B.Tech, B.Sc, MBA
   description   String?
   institutionId String
   duration      String?
   eligibility   String?
   isActive      Boolean  @default(true)
+  admissionsOpen Boolean? // For colleges: whether admissions are open for this course
   customData    Json?    // Admin-defined custom fields
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
   // Relations
-  institution     Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
-  leads           Lead[]
-  trainingModules TrainingModule[]
+  institution          Institution          @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  leads                Lead[]
+  trainingModules      TrainingModule[]
+  historicalAdmissions HistoricalAdmission[]
 
   @@index([institutionId])
   @@map("courses")
@@ -221,16 +271,30 @@ model Lead {
   consent                 Boolean        @default(false)
   customData              Json?          // Admin-defined custom fields from admission form
   // Assignment & Classification
-  classification          Classification @default(RAW)
+  classification          Classification @default(NEW)
   priority                Priority       @default(NORMAL)
   assignedCounselorId     String?
   autoAssigned            Boolean        @default(false)
   assignmentReason        String         @default("")
   status                  LeadStatus     @default(NEW)
-  leadSource              String?        // e.g. "College Website"
+  leadSource              String?        // e.g. "College Website" (legacy)
   sourceCollege           String?        // College name from external enquiry
+  // Lead source tracking (UTM, Meta, WhatsApp)
+  source                  LeadSource?    // instagram_ads | facebook_ads | website | whatsapp_direct | referral | manual_entry
+  medium                  String?        // e.g. whatsapp, cpc
+  campaign                String?
+  utm_source              String?
+  utm_medium              String?
+  utm_campaign            String?
+  fbclid                  String?        // Meta click ID when present in URL
   submittedAt             DateTime       @default(now())
   updatedAt               DateTime       @updatedAt
+  // Parent feedback flow
+  feedbackStatus          FeedbackStatus @default(NOT_SENT)
+  counselingCompletedAt   DateTime?
+  feedbackSentAt          DateTime?
+  feedbackSubmittedAt    DateTime?
+  feedbackToken           String?        @unique
 
   // Relations
   institution       Institution         @relation(fields: [institutionId], references: [id], onDelete: Restrict)
@@ -239,6 +303,9 @@ model Lead {
   sessions          CounselingSession[]
   responses         Response[]
   todos             Todo[]
+  callLogs          CallLog[]
+  leadCalls         LeadCall[]
+  parentFeedback    ParentFeedback?
 
   @@index([assignedCounselorId])
   @@index([autoAssigned])
@@ -255,6 +322,7 @@ model Lead {
   @@index([assignedCounselorId, status])
   @@index([classification, priority])
   @@index([autoAssigned, assignedCounselorId])
+  @@index([source])
   @@map("leads")
 }
 
@@ -270,9 +338,10 @@ enum CounselingMode {
 }
 
 enum Classification {
-  RAW
-  VERIFIED
+  NEW
+  COUNSELING_IN_PROGRESS
   PRIORITY
+  ADMISSION_CONFIRMED
 }
 
 enum Priority {
@@ -289,21 +358,50 @@ enum LeadStatus {
   ENROLLED
   REJECTED
   ON_HOLD
+  CALL_NOT_CONNECTED
+}
+
+enum LeadSource {
+  instagram_ads
+  facebook_ads
+  website
+  whatsapp_direct
+  referral
+  manual_entry
+}
+
+enum FeedbackStatus {
+  NOT_SENT
+  SENT
+  SUBMITTED
 }
 
 // Counseling Session Model
 model CounselingSession {
-  id               String         @id @default(cuid())
-  leadId           String
-  counselorId      String
-  scheduledDate    DateTime
-  mode             CounselingMode
-  status           SessionStatus  @default(SCHEDULED)
-  remarks          String?
-  followUpRequired Boolean        @default(false)
-  followUpDate     DateTime?
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  id                 String         @id @default(cuid())
+  leadId             String
+  counselorId        String
+  scheduledDate      DateTime       // start_time
+  endDate            DateTime?      // end_time; if null, treat as start + 30 min for overlap
+  duration           Int?           // duration in minutes
+  mode               CounselingMode
+  meetingType        String?        // For Online: 'AUDIO' | 'VIDEO'; null for Offline
+  status             SessionStatus  @default(SCHEDULED)
+  remarks            String?
+  followUpRequired   Boolean        @default(false)
+  followUpDate       DateTime?
+  meetingLink        String?        // Google Meet / video link for this session
+  googleEventId      String?        // Google Calendar event id
+  completedAt        DateTime?      // Set when status = COMPLETED
+  // Retry lifecycle for NOT_CONNECTED handling
+  attemptCount       Int            @default(0)
+  lastAttemptAt      DateTime?
+  maxAttempts        Int            @default(3)
+  connectionReason   String?        @db.Text
+  missedCallReasonType String?      // COUNSELOR_MISSED | PARENT_MISSED | CUSTOM (when status = NOT_CONNECTED)
+  isOverdue          Boolean        @default(false)
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
 
   // Relations
   lead      Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
@@ -312,14 +410,19 @@ model CounselingSession {
 
   @@index([leadId])
   @@index([counselorId])
+  @@index([status])
+  @@index([status, attemptCount])
   @@map("counseling_sessions")
 }
 
 enum SessionStatus {
   SCHEDULED
   COMPLETED
-  CANCELLED
+  NOT_CONNECTED
+  NO_SHOW_PARENT
+  NO_SHOW_COUNSELOR
   RESCHEDULED
+  CANCELLED
 }
 
 // Training Content Model (Legacy - kept for backward compatibility)
@@ -393,6 +496,7 @@ model TrainingModule {
   createdBy      User               @relation(fields: [createdById], references: [id], onDelete: Restrict)
   progress       TrainingProgress[]
   assignments    TrainingModuleAssignment[]
+  embeddings     TrainingEmbedding[]
 
   @@index([isPublished])
   @@index([schoolId])
@@ -401,6 +505,20 @@ model TrainingModule {
   @@index([createdById])
   @@index([contentType])
   @@map("training_modules")
+}
+
+// Chunks + embeddings for RAG (Training Assistant chatbot)
+model TrainingEmbedding {
+  id               String    @id @default(cuid())
+  trainingModuleId String
+  chunk            String
+  embeddingVector  Float[]
+  createdAt        DateTime  @default(now())
+
+  trainingModule TrainingModule @relation(fields: [trainingModuleId], references: [id], onDelete: Cascade)
+
+  @@index([trainingModuleId])
+  @@map("training_embeddings")
 }
 
 // Training Progress Model
@@ -475,6 +593,36 @@ enum TodoStatus {
   COMPLETED
 }
 
+// Admin dashboard alerts (lead unattended, counselor inactivity, auto-reassignment)
+enum AdminAlertSeverity {
+  CRITICAL
+  WARNING
+  INFO
+}
+
+enum AdminAlertType {
+  LEAD_UNATTENDED
+  COUNSELOR_INACTIVITY
+  LEAD_REASSIGNMENT
+}
+
+model AdminAlert {
+  id         String             @id @default(cuid())
+  type       AdminAlertType
+  severity   AdminAlertSeverity @default(WARNING)
+  title      String
+  message    String
+  meta       Json?
+  // Used to avoid spamming duplicate alerts across runs (optional).
+  dedupeKey  String?            @unique
+  createdAt  DateTime           @default(now())
+  resolvedAt DateTime?
+
+  @@index([type, createdAt(sort: Desc)])
+  @@index([resolvedAt])
+  @@map("admin_alerts")
+}
+
 // Activity Log Model
 model ActivityLog {
   id         String     @id @default(cuid())
@@ -517,6 +665,11 @@ model CounselorPresence {
   activeMinutesToday Int        @default(0)
   totalActiveMinutes Int        @default(0)
   lastStatusChange  DateTime    @default(now())
+  clockInAt         DateTime?
+  clockOutAt        DateTime?
+  breakStartAt      DateTime?
+  breakEndAt        DateTime?
+  breakReason       String?     @db.Text
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
 
@@ -533,6 +686,8 @@ enum PresenceStatus {
   ACTIVE
   AWAY
   OFFLINE
+  ON_BREAK
+  IN_MEETING
 }
 
 // Daily Attendance Model
@@ -638,3 +793,455 @@ model AppSettings {
 
   @@map("app_settings")
 }
+
+// System-wide settings (single-row table) for lead assignment and other platform-wide flags.
+model SystemSettings {
+  id                  String             @id @default(cuid())
+  leadAssignmentMode  LeadAssignmentMode @default(language)
+  // Ordered counselor list is defined by CounselorProfile.createdAt ASC.
+  // Store last assigned index so round robin continues across restarts.
+  lastRoundRobinIndex Int                @default(-1)
+  updatedAt           DateTime           @updatedAt
+
+  @@map("system_settings")
+}
+
+// Call dispositions (master data for lead call outcomes)
+model CallDisposition {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  leadCalls LeadCall[]
+
+  @@map("call_dispositions")
+}
+
+// Lead calls - logged from counselor panel (Call button in lead detail)
+model LeadCall {
+  id              String    @id @default(cuid())
+  leadId          String
+  counselorId     String
+  callStartTime   DateTime
+  callEndTime     DateTime
+  dispositionId   String
+  notes           String    @db.Text
+  createdAt       DateTime  @default(now())
+
+  lead        Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  counselor   CounselorProfile @relation(fields: [counselorId], references: [id], onDelete: Cascade)
+  disposition CallDisposition  @relation(fields: [dispositionId], references: [id], onDelete: Restrict)
+
+  @@index([leadId])
+  @@index([counselorId])
+  @@index([dispositionId])
+  @@map("lead_calls")
+}
+
+// Voice Call Lead Update - call log entry
+model CallLog {
+  id                   String    @id @default(cuid())
+  leadId               String
+  counselorId          String
+  callTimestamp        DateTime  @default(now())
+  callSummary          String
+  leadTemperature      String?
+  conversionProbability Int?
+  formData             Json?     // Full wizard form data for audit
+  createdAt            DateTime  @default(now())
+
+  lead      Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  counselor CounselorProfile @relation(fields: [counselorId], references: [id], onDelete: Cascade)
+
+  @@index([leadId])
+  @@index([counselorId])
+  @@index([callTimestamp(sort: Desc)])
+  @@map("call_logs")
+}
+
+// Master options for Voice Call wizard dropdowns (dynamic, no hardcoding)
+model MasterOption {
+  id        String   @id @default(cuid())
+  category  String   // e.g. passing_year, entrance_exam, loan_required, admission_timeline
+  value     String
+  label     String
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([category, value])
+  @@index([category])
+  @@map("master_options")
+}
+
+// Historical Admissions & Publicity – uploaded files per institution
+model HistoricalFile {
+  id            String    @id @default(cuid())
+  institutionId String
+  fileName      String
+  fileType      String    // xlsx, xls, pdf, docx, jpg, jpeg, png
+  fileUrl       String
+  fileSize      Int?      // bytes
+  academicYear  String?
+  category      String    // Marketing, Publicity, Both
+  description   String?
+  parsedData    Json?     // Excel rows as JSON
+  extractedText String?   @db.Text // Word/PDF extracted text
+  status        HistoricalFileStatus @default(PENDING)
+  uploadedById  String
+  uploadedAt    DateTime  @default(now())
+  verifiedById  String?
+  verifiedAt    DateTime?
+
+  institution Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  uploadedBy  User       @relation(fields: [uploadedById], references: [id], onDelete: Cascade)
+
+  @@index([institutionId])
+  @@index([status])
+  @@index([uploadedAt])
+  @@map("historical_files")
+}
+
+enum HistoricalFileStatus {
+  PENDING
+  VERIFIED
+  LOCKED
+}
+
+// Historical Admissions entries (Admissions / Marketing / Publicity) with status and documents
+enum HistoricalAdmissionCategory {
+  Admissions
+  Marketing
+  Publicity
+}
+
+enum HistoricalAdmissionStatus {
+  DRAFT
+  SUBMITTED
+  VERIFIED
+  LOCKED
+}
+
+model HistoricalAdmission {
+  id            String                      @id @default(cuid())
+  institutionId String
+  courseId      String?
+  academicYear  String
+  category      HistoricalAdmissionCategory
+  status        HistoricalAdmissionStatus   @default(DRAFT)
+  title         String?
+  description   String?                     @db.Text
+  applicationData Json?                      // Admissions: seats, cutoffs, etc.
+  marketingData   Json?                      // Marketing/Publicity: campaign, channels, etc.
+  isPlaceholder   Boolean                   @default(false)
+  createdAt     DateTime                   @default(now())
+  updatedAt     DateTime                   @updatedAt
+
+  institution Institution                @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  course      Course?                    @relation(fields: [courseId], references: [id], onDelete: SetNull)
+  images      HistoricalAdmissionImage[]
+
+  @@index([institutionId])
+  @@index([courseId])
+  @@index([category])
+  @@index([status])
+  @@index([academicYear])
+  @@map("historical_admissions")
+}
+
+model HistoricalAdmissionImage {
+  id                   String   @id @default(cuid())
+  historicalAdmissionId String
+  fileName             String
+  fileUrl              String
+  fileType             String
+  fileSize             Int?
+  sortOrder            Int      @default(0)
+  createdAt            DateTime @default(now())
+
+  historicalAdmission HistoricalAdmission @relation(fields: [historicalAdmissionId], references: [id], onDelete: Cascade)
+
+  @@index([historicalAdmissionId])
+  @@map("historical_admission_images")
+}
+
+// Historical Admissions & Marketing Intelligence – structured multi-year data
+model HistoricalMarketingRecord {
+  id                    String   @id @default(cuid())
+  institutionId         String
+  academicYear          String   // e.g. "2023-24", "2022-23"
+  courseName            String
+  totalInquiries        Int      @default(0)
+  totalApplications     Int      @default(0)
+  confirmedAdmissions   Int      @default(0)
+  maleCount             Int      @default(0)
+  femaleCount           Int      @default(0)
+  zipCode               String?
+  marketingChannel      String?
+  marketingSpend        Float?
+  leadsGenerated        Int?
+  admissionsFromCampaign Int?
+  status                HistoricalMarketingStatus @default(DRAFT)
+  sourceType            String?   // EXCEL, PHOTO_OCR
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  institution Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  @@index([institutionId])
+  @@index([academicYear])
+  @@index([courseName])
+  @@index([zipCode])
+  @@index([status])
+  @@map("historical_marketing_records")
+}
+
+enum HistoricalMarketingStatus {
+  DRAFT
+  VERIFIED
+  LOCKED
+}
+
+// Parent feedback after counseling (one per lead)
+model ParentFeedback {
+  id                   String   @id @default(cuid())
+  leadId               String   @unique
+  studentName          String
+  parentName           String
+  email                String
+  phone                String
+  counselorId          String
+  institutionId       String
+  experienceRating     Int      // 1-5
+  explanationRating    Int      // 1-5
+  helpfulnessRating    Int      // 1-5
+  questionsAnswered    Boolean
+  professionalismRating Int     // 1-5
+  interestLevel        String  // Very Interested, Interested, Not Sure, Not Interested
+  admissionDecision    String  // Ready to take admission, Need more time, Exploring other institutions, Not interested
+  concern              String? // Fees, Location, etc. Only set when interestLevel = Not Interested
+  likedFeedback        String? @db.Text
+  improvementFeedback  String? @db.Text
+  recommend            Boolean
+  createdAt            DateTime @default(now())
+
+  lead         Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  counselor    CounselorProfile @relation(fields: [counselorId], references: [id], onDelete: Cascade)
+  institution  Institution      @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  @@index([counselorId])
+  @@index([institutionId])
+  @@index([createdAt])
+  @@map("parent_feedback")
+}
+
+// Historical Data & Verification – admin upload → validate → pending → verify → counselor sees only verified
+enum HistoricalUploadStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum HistoricalDataType {
+  admissions
+  leads
+  fees
+  feedback
+}
+
+model HistoricalUpload {
+  id               String                  @id @default(cuid())
+  institutionId    String
+  academicYear     String
+  dataType         HistoricalDataType
+  description      String?                 @db.Text
+  fileUrl          String                  @db.Text
+  fileName         String?
+  fileSize         Int?
+  status           HistoricalUploadStatus @default(PENDING)
+  uploadedById     String
+  uploadedAt       DateTime                @default(now())
+  verifiedById     String?
+  verifiedAt       DateTime?
+  rejectionReason  String?                 @db.Text
+
+  institution  Institution       @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  uploadedBy   User              @relation("HistoricalUploadsUploaded", fields: [uploadedById], references: [id], onDelete: Restrict)
+  verifiedBy   User?             @relation("HistoricalUploadsVerified", fields: [verifiedById], references: [id], onDelete: SetNull)
+  records      HistoricalRecord[]
+
+  @@index([institutionId])
+  @@index([status])
+  @@index([academicYear])
+  @@index([uploadedAt])
+  @@map("historical_uploads")
+}
+
+model HistoricalRecord {
+  id         String   @id @default(cuid())
+  uploadId   String
+  recordData Json     // Flexible JSONB for parsed row data
+  createdAt  DateTime @default(now())
+
+  upload HistoricalUpload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+
+  @@index([uploadId])
+  @@map("historical_records")
+}
+
+// ========== PRAVIDYA Multi-Tenant Academy System ==========
+model Academy {
+  id            String   @id @default(cuid())
+  name          String
+  slug          String   @unique
+  domain        String?
+  logoUrl       String?
+  description   String?  @db.Text
+  contactEmail  String?
+  contactPhone  String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  academyUsers AcademyUser[]
+  academyLeads AcademyLead[]
+
+  @@index([slug])
+  @@index([domain])
+  @@map("academies")
+}
+
+model AcademyUser {
+  id                 String    @id @default(cuid())
+  academyId          String
+  academy            Academy   @relation(fields: [academyId], references: [id], onDelete: Cascade)
+  role               AcademyRole
+  fullName           String?   // Display name (e.g. "Rakesh Kumar" for Counselor1)
+  email              String
+  passwordHash       String
+  passwordLastChanged DateTime @default(now())
+  otpCode            String?
+  otpExpiry          DateTime?
+  isVerified         Boolean   @default(false)
+  failedAttempts     Int       @default(0)
+  lockedUntil        DateTime?
+  resetToken         String?   @unique
+  resetTokenExpiry   DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@unique([academyId, email])
+  @@index([academyId])
+  @@index([email])
+  @@map("academy_users")
+}
+
+model AcademyLead {
+  id         String   @id @default(cuid())
+  academyId  String
+  academy    Academy  @relation(fields: [academyId], references: [id], onDelete: Cascade)
+  studentName String
+  parentName  String
+  phone       String
+  email      String
+  course     String
+  source     String   @default("DIRECT")
+  createdAt   DateTime @default(now())
+
+  @@index([academyId])
+  @@index([createdAt(sort: Desc)])
+  @@map("academy_leads")
+}
+
+enum AcademyRole {
+  ADMIN
+  COUNSELOR
+  MANAGEMENT
+}
+
+// ========== Central Intelligence (RAG Engine) ==========
+
+model KnowledgeSource {
+  id             String   @id @default(cuid())
+  organizationId String
+  fileName       String
+  filePath       String
+  fileType       String
+  uploadedBy     String
+  contentHash    String?  // SHA256 of extracted text — used to reject duplicate content (same file or same content different format)
+  createdAt      DateTime @default(now())
+
+  chunks KnowledgeChunk[]
+
+  @@index([organizationId])
+  @@index([createdAt(sort: Desc)])
+  @@index([organizationId, contentHash])
+  @@map("knowledge_sources")
+}
+
+model KnowledgeChunk {
+  id             String   @id @default(cuid())
+  sourceId       String
+  organizationId String
+  content        String   @db.Text
+  embedding      Unsupported("vector(1536)")
+  metadata       Json
+  createdAt      DateTime @default(now())
+
+  source KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([sourceId])
+  @@map("knowledge_chunks")
+}
+
+model QueryCache {
+  id             String   @id @default(cuid())
+  organizationId String
+  query          String   @db.Text
+  response       String   @db.Text
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId, createdAt(sort: Desc)])
+  @@map("intelligence_query_cache")
+}
+
+// ========== SaaS License-Based Onboarding (Jeetofy) ==========
+
+model SaasAcademy {
+  id            String      @id @default(cuid())
+  academyId     String      @unique
+  schoolName    String
+  logoUrl       String?
+  address       String?
+  licenseExpiry DateTime
+
+  users         SaasUser[]
+
+  @@index([academyId])
+  @@map("saas_academies")
+}
+
+enum SaasRole {
+  ADMIN
+  TEACHER
+  STAFF
+}
+
+model SaasUser {
+  id        String   @id @default(cuid())
+  academyId String
+  email     String
+  password  String
+  role      SaasRole
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  academy   SaasAcademy @relation(fields: [academyId], references: [academyId], onDelete: Cascade)
+
+  @@unique([academyId, email])
+  @@index([academyId])
+  @@map("saas_users")
+}
+
+

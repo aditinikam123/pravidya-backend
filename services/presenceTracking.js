@@ -271,7 +271,7 @@ export const checkInactivity = async (counselorId) => {
     where: { counselorId }
   });
 
-  if (!presence || presence.status === 'OFFLINE') {
+  if (!presence || presence.status === 'OFFLINE' || presence.status === 'ON_BREAK' || presence.status === 'IN_MEETING') {
     return presence;
   }
 
@@ -311,12 +311,20 @@ export const getPresenceStatus = async (counselorId) => {
       status: 'OFFLINE',
       lastLoginAt: null,
       activeMinutesToday: 0,
-      totalActiveMinutes: 0
+      totalActiveMinutes: 0,
+      clockInAt: null,
+      clockOutAt: null,
+      breakStartAt: null,
+      breakEndAt: null,
+      breakReason: null,
+      lastStatusChange: null
     };
   }
 
-  // Check inactivity
-  await checkInactivity(counselorId);
+  // Check inactivity (only for ACTIVE/AWAY; don't auto-change ON_BREAK/IN_MEETING)
+  if (['ACTIVE', 'AWAY'].includes(presence.status)) {
+    await checkInactivity(counselorId);
+  }
 
   // Refresh presence data
   const updated = await prisma.counselorPresence.findUnique({
@@ -328,8 +336,109 @@ export const getPresenceStatus = async (counselorId) => {
     lastLoginAt: updated.lastLoginAt,
     lastActivityAt: updated.lastActivityAt,
     activeMinutesToday: updated.activeMinutesToday,
-    totalActiveMinutes: updated.totalActiveMinutes
+    totalActiveMinutes: updated.totalActiveMinutes,
+    clockInAt: updated.clockInAt,
+    clockOutAt: updated.clockOutAt,
+    breakStartAt: updated.breakStartAt,
+    breakEndAt: updated.breakEndAt,
+    breakReason: updated.breakReason,
+    lastStatusChange: updated.lastStatusChange
   };
+};
+
+// Clock In: set status ACTIVE, store clock_in time
+export const clockIn = async (counselorId) => {
+  const now = new Date();
+  let presence = await prisma.counselorPresence.findUnique({ where: { counselorId } });
+  if (!presence) {
+    presence = await prisma.counselorPresence.create({
+      data: {
+        counselorId,
+        lastLoginAt: now,
+        lastActivityAt: now,
+        status: 'ACTIVE',
+        lastStatusChange: now,
+        clockInAt: now,
+        activeMinutesToday: 0
+      }
+    });
+  } else {
+    presence = await prisma.counselorPresence.update({
+      where: { counselorId },
+      data: {
+        status: 'ACTIVE',
+        lastStatusChange: now,
+        lastActivityAt: now,
+        clockInAt: now,
+        clockOutAt: null,
+        breakStartAt: null,
+        breakEndAt: null,
+        breakReason: null
+      }
+    });
+  }
+  return presence;
+};
+
+// Clock Out: set status OFFLINE, store clock_out time (allowed even when ON_BREAK / IN_MEETING)
+export const clockOut = async (counselorId) => {
+  const now = new Date();
+  const presence = await prisma.counselorPresence.findUnique({ where: { counselorId } });
+  if (!presence) return null;
+  const updated = await prisma.counselorPresence.update({
+    where: { counselorId },
+    data: {
+      status: 'OFFLINE',
+      lastStatusChange: now,
+      clockOutAt: now
+    }
+  });
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  try {
+    await prisma.dailyAttendance.updateMany({
+      where: { counselorId, date: today },
+      data: { logoutTime: now, status: 'PARTIAL' }
+    });
+  } catch (_) {
+    // Don't fail clock out if attendance update fails (e.g. no row for today)
+  }
+  return updated;
+};
+
+// Break Start: set status ON_BREAK or IN_MEETING, store break_start_time and break_reason
+export const breakStart = async (counselorId, reason, customReason = null) => {
+  const now = new Date();
+  const presence = await prisma.counselorPresence.findUnique({ where: { counselorId } });
+  if (!presence) return null;
+  const isCustom = reason === 'Custom' || reason === 'Custom Reason';
+  const displayReason = isCustom && customReason ? String(customReason).trim() : reason;
+  const status = reason === 'In a Meeting' ? 'IN_MEETING' : 'ON_BREAK';
+  return prisma.counselorPresence.update({
+    where: { counselorId },
+    data: {
+      status,
+      lastStatusChange: now,
+      breakStartAt: now,
+      breakReason: displayReason || reason
+    }
+  });
+};
+
+// Break End: set status ACTIVE, store break_end_time
+export const breakEnd = async (counselorId) => {
+  const now = new Date();
+  const presence = await prisma.counselorPresence.findUnique({ where: { counselorId } });
+  if (!presence) return null;
+  return prisma.counselorPresence.update({
+    where: { counselorId },
+    data: {
+      status: 'ACTIVE',
+      lastStatusChange: now,
+      lastActivityAt: now,
+      breakEndAt: now
+    }
+  });
 };
 
 // Get all active counselors
@@ -354,6 +463,30 @@ export const getActiveCounselors = async () => {
       lastActivityAt: 'desc'
     }
   });
+};
+
+// Get all counselors with current status (for admin panel)
+export const getAllCounselorsStatus = async () => {
+  const counselors = await prisma.counselorProfile.findMany({
+    select: {
+      id: true,
+      fullName: true,
+      user: { select: { username: true, email: true } },
+      presence: true
+    },
+    orderBy: { fullName: 'asc' }
+  });
+  return counselors.map((c) => ({
+    counselorId: c.id,
+    counselorName: c.fullName,
+    username: c.user?.username,
+    email: c.user?.email,
+    status: c.presence?.status ?? 'OFFLINE',
+    since: c.presence?.lastStatusChange ?? c.presence?.clockInAt ?? c.presence?.lastLoginAt ?? null,
+    breakReason: c.presence?.breakReason ?? null,
+    clockInAt: c.presence?.clockInAt ?? null,
+    clockOutAt: c.presence?.clockOutAt ?? null
+  }));
 };
 
 // Get daily attendance summary

@@ -1,0 +1,44 @@
+generator client_saas {
+  provider = "prisma-client-js"
+  output   = "../saas-client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model SaasAcademy {
+  id            String      @id @default(cuid())
+  academyId     String      @unique
+  schoolName    String
+  logoUrl       String?
+  address       String?
+  licenseExpiry DateTime
+
+  users         SaasUser[]
+
+  @@index([academyId])
+}
+
+enum SaasRole {
+  ADMIN
+  TEACHER
+  STAFF
+}
+
+model SaasUser {
+  id        String   @id @default(cuid())
+  academyId String
+  email     String
+  password  String
+  role      SaasRole
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  academy   SaasAcademy @relation(fields: [academyId], references: [academyId], onDelete: Cascade)
+
+  @@unique([academyId, email])
+  @@index([academyId])
+}
+

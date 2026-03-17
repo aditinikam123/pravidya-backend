@@ -96,8 +96,22 @@ const leadSchema = new mongoose.Schema({
   // Assignment & Classification
   classification: {
     type: String,
-    enum: ['RAW', 'VERIFIED', 'PRIORITY'],
+    enum: ['RAW', 'VERIFIED', 'PRIORITY', 'ADMISSION_CONFIRMED'],
     default: 'RAW'
+  },
+  admissionPaymentMode: {
+    type: String,
+    enum: ['ONLINE', 'CASH', null],
+    default: null
+  },
+  admissionPaymentReference: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  admissionConfirmedAt: {
+    type: Date,
+    default: null
   },
   priority: {
     type: String,

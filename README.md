@@ -70,7 +70,7 @@ Production-ready MERN stack backend for an intelligent admissions management pla
    npm start
    ```
 
-The server will run on `http://localhost:5000`
+The server will run on `http://localhost:8000`
 
 ## 📁 Project Structure
 
@@ -285,7 +285,7 @@ The system automatically assigns leads to counselors based on:
 
 **1. Create Lead (Public)**
 ```bash
-curl -X POST http://localhost:5000/api/leads \
+curl -X POST http://localhost:8000/api/leads \
   -H "Content-Type: application/json" \
   -d '{
     "parentName": "John Doe",
@@ -310,7 +310,7 @@ curl -X POST http://localhost:5000/api/leads \
 
 **2. Login**
 ```bash
-curl -X POST http://localhost:5000/api/auth/login \
+curl -X POST http://localhost:8000/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{
     "username": "admin",
@@ -320,7 +320,7 @@ curl -X POST http://localhost:5000/api/auth/login \
 
 **3. Get All Leads (Admin)**
 ```bash
-curl -X GET http://localhost:5000/api/leads \
+curl -X GET http://localhost:8000/api/leads \
   -H "Authorization: Bearer <token>"
 ```
 
@@ -364,6 +364,19 @@ Training content files are stored in `uploads/training/` directory. Make sure th
 4. **Validate file uploads** (already implemented)
 5. **Rate limiting** recommended for production
 6. **Input validation** on all endpoints (already implemented)
+
+## 🚀 Deploy to Hostinger
+
+The backend is **ready to deploy** with Hostinger’s default Node.js build (no custom build command needed).
+
+1. **Zip the backend**  
+   From the repo root, zip the contents of `pravidya/backend/` (do **not** include `node_modules` or `.env`).
+
+2. **Upload** the zip in Hostinger → Node.js app, set **Root directory** to `backend`, **Entry file** to `server.js`, Node 22.x.
+
+3. **Configure** environment variables in the Hostinger panel (same keys as in `.env.example`).
+
+4. **Deploy** — Hostinger will run `npm install` and `npm run build`; the build script fixes Prisma binary permissions and runs `prisma generate` automatically.
 
 ## 📄 License
 

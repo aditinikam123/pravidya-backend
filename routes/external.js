@@ -134,7 +134,7 @@ router.post('/college-enquiry', [
     preferredCounselingMode: null,
     notes: notes ? notes.trim() : null,
     consent: true,
-    classification: 'RAW',
+    classification: 'NEW',
     priority: 'NORMAL',
     status: 'NEW',
     assignedCounselorId: null,

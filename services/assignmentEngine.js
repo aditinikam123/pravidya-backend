@@ -11,15 +11,36 @@ class AssignmentEngine {
    * @param {Object} lead - The lead object (Prisma Lead model)
    * @returns {Object} - Assignment result with counselor and reason
    */
+  /**
+   * Parse lead's preferred language(s) - can be single "Telugu" or comma-separated "Telugu, Kannada"
+   * @returns {string[]} Normalized language strings (trimmed, lowercase for comparison)
+   */
+  _parsePreferredLanguages(lead) {
+    const raw = (lead.preferredLanguage || 'English').toString().trim();
+    if (!raw) return ['english'];
+    return raw.split(',').map(l => l.trim().toLowerCase()).filter(Boolean);
+  }
+
+  /**
+   * Check if counselor has at least one language matching lead's preferred languages
+   */
+  _counselorMatchesLanguage(counselor, preferredLangs) {
+    if (!counselor.languages || counselor.languages.length === 0) return false;
+    return counselor.languages.some(cl =>
+      cl && preferredLangs.some(pl => (cl.trim().toLowerCase()) === pl)
+    );
+  }
+
   async findBestCounselor(lead) {
     try {
-      // Get course details to check expertise
-      const course = await prisma.course.findUnique({
-        where: { id: lead.courseId }
-      });
+      const preferredLangs = this._parsePreferredLanguages(lead);
 
-      if (!course) {
-        return await this.getDefaultAssignment('Course not found');
+      // Get course details (optional - for expertise scoring)
+      let course = null;
+      if (lead.courseId) {
+        course = await prisma.course.findUnique({
+          where: { id: lead.courseId }
+        });
       }
 
       // Get all active counselors with their user data
@@ -33,19 +54,41 @@ class AssignmentEngine {
       });
 
       if (activeCounselors.length === 0) {
-        return await this.getDefaultAssignment('No active counselors available');
+        return {
+          counselor: null,
+          autoAssigned: false,
+          assignmentReason: 'No active counselors available',
+          needsManualAssignment: true,
+          score: 0
+        };
       }
 
-      // Score each counselor based on matching criteria
-      const scoredCounselors = activeCounselors.map(counselor => {
-        let score = 0;
-        const reasons = [];
+      // REQUIRED: Only consider counselors with at least one matching language
+      const languageMatchedCounselors = activeCounselors.filter(c =>
+        this._counselorMatchesLanguage(c, preferredLangs)
+      );
 
-        // 1. Expertise match (highest priority - 40 points)
-        if (counselor.expertise && counselor.expertise.length > 0) {
+      if (languageMatchedCounselors.length === 0) {
+        const langDisplay = (lead.preferredLanguage || 'English').toString().trim();
+        return {
+          counselor: null,
+          autoAssigned: false,
+          assignmentReason: `No counselor found with preferred language (${langDisplay}). Please assign manually.`,
+          needsManualAssignment: true,
+          score: 0
+        };
+      }
+
+      // Score each language-matched counselor
+      const scoredCounselors = languageMatchedCounselors.map(counselor => {
+        let score = 0;
+        const reasons = ['Language match'];
+
+        // 1. Expertise match (if course available - 40 points)
+        if (course && counselor.expertise && counselor.expertise.length > 0) {
           const courseName = course.name.toLowerCase();
-          const hasExpertise = counselor.expertise.some(exp => 
-            courseName.includes(exp.toLowerCase()) || 
+          const hasExpertise = counselor.expertise.some(exp =>
+            courseName.includes(exp.toLowerCase()) ||
             exp.toLowerCase().includes(courseName)
           );
           if (hasExpertise) {
@@ -54,35 +97,20 @@ class AssignmentEngine {
           }
         }
 
-        // 2. Language match (high priority - 30 points)
-        if (counselor.languages && counselor.languages.length > 0) {
-          const hasLanguage = counselor.languages.some(lang =>
-            lang.toLowerCase() === lead.preferredLanguage.toLowerCase()
-          );
-          if (hasLanguage) {
-            score += 30;
-            reasons.push('Language match');
-          }
-        }
-
-        // 3. Availability check (required - 0 points but must pass)
-        if (counselor.availability !== 'ACTIVE') {
-          return null; // Skip inactive counselors
-        }
-
-        // 4. Load capacity check (medium priority - 20 points)
+        // 2. Load capacity check (medium priority - 20 points)
         const loadPercentage = (counselor.currentLoad / counselor.maxCapacity) * 100;
+        if (loadPercentage >= 100) {
+          return null; // Skip fully loaded counselors
+        }
         if (loadPercentage < 50) {
           score += 20;
           reasons.push('Low workload');
         } else if (loadPercentage < 80) {
           score += 10;
           reasons.push('Moderate workload');
-        } else if (loadPercentage >= 100) {
-          return null; // Skip fully loaded counselors
         }
 
-        // 5. Current load (lower priority - 10 points)
+        // 3. Current load (lower priority - 10 points)
         if (counselor.currentLoad === 0) {
           score += 10;
           reasons.push('No current load');
@@ -94,10 +122,17 @@ class AssignmentEngine {
           reasons: reasons.join(', '),
           loadPercentage
         };
-      }).filter(item => item !== null); // Remove null entries
+      }).filter(item => item !== null);
 
       if (scoredCounselors.length === 0) {
-        return await this.getDefaultAssignment('No counselors meet the criteria');
+        const langDisplay = (lead.preferredLanguage || 'English').toString().trim();
+        return {
+          counselor: null,
+          autoAssigned: false,
+          assignmentReason: `No counselor with preferred language (${langDisplay}) has capacity. Please assign manually.`,
+          needsManualAssignment: true,
+          score: 0
+        };
       }
 
       // Sort by score (highest first), then by load (lowest first)
@@ -114,11 +149,18 @@ class AssignmentEngine {
         counselor: bestMatch.counselor,
         autoAssigned: true,
         assignmentReason: `Auto-assigned: ${bestMatch.reasons} (Score: ${bestMatch.score})`,
-        score: bestMatch.score
+        score: bestMatch.score,
+        needsManualAssignment: false
       };
     } catch (error) {
       console.error('Assignment engine error:', error);
-      return await this.getDefaultAssignment(`Error in assignment: ${error.message}`);
+      return {
+        counselor: null,
+        autoAssigned: false,
+        assignmentReason: `Error in assignment: ${error.message}. Please assign manually.`,
+        needsManualAssignment: true,
+        score: 0
+      };
     }
   }
 
@@ -145,7 +187,7 @@ class AssignmentEngine {
       if (defaultCounselor) {
         return {
           counselor: defaultCounselor,
-          autoAssigned: false,
+          autoAssigned: true,
           assignmentReason: `Default assignment: ${reason}`,
           score: 0
         };
@@ -193,12 +235,12 @@ class AssignmentEngine {
 
       // Use transaction to ensure atomicity
       const result = await prisma.$transaction(async (tx) => {
-        // Update lead
+        // Update lead – any assignment via this engine is auto (import, public form, etc.)
         const updatedLead = await tx.lead.update({
           where: { id: lead.id },
           data: {
             assignedCounselorId: assignmentResult.counselor.id,
-            autoAssigned: assignmentResult.autoAssigned,
+            autoAssigned: true,
             assignmentReason: assignmentResult.assignmentReason
           }
         });
@@ -229,11 +271,13 @@ class AssignmentEngine {
    * @param {Object} lead - The lead object (Prisma Lead model)
    * @param {String} newCounselorId - New counselor ID (Prisma CUID)
    * @param {String} reason - Reason for reassignment
+   * @param {Object} opts - Options
    * @returns {Object} - Updated lead
    */
-  async reassignLead(lead, newCounselorId, reason) {
+  async reassignLead(lead, newCounselorId, reason, opts = {}) {
     try {
       const oldCounselorId = lead.assignedCounselorId;
+      const isAuto = opts?.isAuto === true;
 
       // Use transaction to ensure atomicity
       const result = await prisma.$transaction(async (tx) => {
@@ -275,8 +319,8 @@ class AssignmentEngine {
             where: { id: lead.id },
             data: {
               assignedCounselorId: newCounselorId,
-              autoAssigned: false, // Manual reassignment overrides auto
-              assignmentReason: `Manually reassigned: ${reason}`
+              autoAssigned: isAuto ? true : false,
+              assignmentReason: isAuto ? `Auto-reassigned: ${reason}` : `Manually reassigned: ${reason}`
             }
           });
 
@@ -288,7 +332,7 @@ class AssignmentEngine {
             data: {
               assignedCounselorId: null,
               autoAssigned: false,
-              assignmentReason: `Unassigned: ${reason}`
+              assignmentReason: isAuto ? `Auto-unassigned: ${reason}` : `Unassigned: ${reason}`
             }
           });
 

@@ -7,6 +7,7 @@ import { asyncHandler } from '../middleware/asyncHandler.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { prisma } from '../prisma/client.js';
 import assignmentEngine from '../services/assignmentEngine.js';
+import { autoAssignNewLead, findCounselorForNewLead, findRoundRobinCounselor } from '../services/leadAssignmentService.js';
 import {
   validateHeaders,
   previewImport,
@@ -15,6 +16,37 @@ import {
 } from '../services/leadImportService.js';
 
 const router = express.Router();
+
+// Map UTM/source to LeadSource enum (website form)
+const VALID_SOURCES = ['instagram_ads', 'facebook_ads', 'website', 'whatsapp_direct', 'referral', 'manual_entry'];
+function mapUtmToSource(utmSource, utmMedium, utmCampaign) {
+  const hasUtm = !!(utmSource || utmMedium || utmCampaign);
+  if (!hasUtm) return 'website';
+  const s = (utmSource || '').toString().trim().toLowerCase();
+  if (s === 'instagram') return 'instagram_ads';
+  if (s === 'facebook') return 'facebook_ads';
+  return 'website';
+}
+
+const TRACKING_KEYS = ['source', 'medium', 'campaign', 'utm_source', 'utm_medium', 'utm_campaign', 'fbclid'];
+
+function buildSourceTracking(body) {
+  const utm_source = body.utm_source ? String(body.utm_source).trim() || null : null;
+  const utm_medium = body.utm_medium ? String(body.utm_medium).trim() || null : null;
+  const utm_campaign = body.utm_campaign ? String(body.utm_campaign).trim() || null : null;
+  const fbclid = body.fbclid ? String(body.fbclid).trim() || null : null;
+  const sourceProvided = body.source && VALID_SOURCES.includes(body.source);
+  const source = sourceProvided ? body.source : mapUtmToSource(utm_source, utm_medium, utm_campaign);
+  const medium = body.medium ? String(body.medium).trim() || null : utm_medium;
+  const campaign = body.campaign ? String(body.campaign).trim() || null : utm_campaign;
+  return { source, medium, campaign, utm_source, utm_medium, utm_campaign, fbclid };
+}
+
+function leadDataWithoutTracking(data) {
+  const out = { ...data };
+  TRACKING_KEYS.forEach((k) => delete out[k]);
+  return out;
+}
 
 // Helper: generate next leadId (LEAD-YYYYMMDD-NNNN)
 async function getNextLeadId() {
@@ -102,6 +134,7 @@ router.post('/simple', [
   const currentYear = String(new Date().getFullYear());
   const notes = [message || '', source ? `Source: ${source}` : ''].filter(Boolean).join(' | ') || null;
 
+  const tracking = buildSourceTracking({ ...req.body, source: source || null });
   const leadData = {
     leadId,
     parentName: parent_name.trim(),
@@ -122,20 +155,25 @@ router.post('/simple', [
     preferredCounselingMode: null,
     notes,
     consent: true,
-    classification: 'RAW',
+    classification: 'NEW',
     priority: 'NORMAL',
     status: 'NEW',
-    leadSource: source || 'Trinity College Admission Enquiry'
+    leadSource: source || 'Trinity College Admission Enquiry',
+    ...tracking
   };
 
-  const lead = await prisma.lead.create({ data: leadData });
+  let lead;
+  try {
+    lead = await prisma.lead.create({ data: leadData });
+  } catch (err) {
+    lead = await prisma.lead.create({
+      data: leadDataWithoutTracking(leadData),
+    });
+  }
 
   // Try auto-assignment (optional; won't fail if no counselors)
   try {
-    const assignmentResult = await assignmentEngine.findBestCounselor(lead);
-    if (assignmentResult?.counselorId) {
-      await assignmentEngine.assignLead(lead, assignmentResult);
-    }
+    await autoAssignNewLead(lead);
   } catch (_) {
     // Leave unassigned if assignment fails
   }
@@ -180,7 +218,7 @@ router.post('/', [
   body('course').notEmpty().withMessage('Course is required'),
   body('academicYear').trim().notEmpty().withMessage('Academic year is required'),
   body('preferredCounselingMode').isIn(['Online', 'Offline']).withMessage('Counseling mode is required'),
-  body('consent').equals('true').withMessage('Consent is required')
+  body('consent').custom((value) => value === true || value === 'true').withMessage('Consent is required')
 ], asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -206,7 +244,8 @@ router.post('/', [
   const nextSequence = maxSeq + 1;
   const leadId = `LEAD-${dateStr}-${String(nextSequence).padStart(4, '0')}`;
 
-  // Map frontend field names to database field names
+  // Map frontend field names to database field names (include UTM/source tracking)
+  const tracking = buildSourceTracking(req.body);
   const leadData = {
     leadId,
     parentName: req.body.parentName,
@@ -227,18 +266,24 @@ router.post('/', [
     notes: req.body.notes || null,
     consent: req.body.consent === 'true' || req.body.consent === true,
     customData: req.body.customData && typeof req.body.customData === 'object' ? req.body.customData : null,
-    classification: 'RAW',
+    classification: ['NEW', 'COUNSELING_IN_PROGRESS', 'PRIORITY', 'ADMISSION_CONFIRMED'].includes(req.body.classification) ? req.body.classification : 'NEW',
     priority: 'NORMAL',
-    status: 'NEW'
+    status: 'NEW',
+    ...tracking
   };
 
-  // Create lead
-  const lead = await prisma.lead.create({
-    data: leadData
-  });
+  // Create lead (retry without tracking fields if DB columns not yet migrated)
+  let lead;
+  try {
+    lead = await prisma.lead.create({ data: leadData });
+  } catch (err) {
+    lead = await prisma.lead.create({
+      data: leadDataWithoutTracking(leadData),
+    });
+  }
 
-  // Automatic counselor assignment
-  const assignmentResult = await assignmentEngine.findBestCounselor(lead);
+  // Automatic counselor assignment (configurable)
+  const assignmentResult = await findCounselorForNewLead(lead);
   await assignmentEngine.assignLead(lead, assignmentResult);
 
   // Reload lead with populated fields
@@ -257,18 +302,23 @@ router.post('/', [
     }
   });
 
+  const needsManualAssignment = !!assignmentResult?.needsManualAssignment || !savedLead.assignedCounselorId;
+  const assignmentWarning = needsManualAssignment ? (assignmentResult?.assignmentReason || 'No counselor assigned. Please assign manually.') : null;
+
   res.status(201).json({
     success: true,
     message: 'Admission form submitted successfully',
     data: {
       lead: savedLead,
-      leadId: savedLead.leadId
+      leadId: savedLead.leadId,
+      needsManualAssignment,
+      assignmentWarning
     }
   });
 }));
 
 // @route   GET /api/leads/form-fields
-// @desc    Get admission form field config (public, for AdmissionForm page)
+// @desc    Get form field config (admission public or admin create lead). ?form=createLead for admin Create Lead form.
 // @access  Public
 const ADMISSION_REQUIRED_DEFAULT = ['parentName', 'parentMobile', 'parentEmail', 'parentCity', 'preferredLanguage', 'studentName', 'dateOfBirth', 'gender', 'currentClass', 'institution', 'course', 'academicYear', 'preferredCounselingMode'];
 const DEFAULT_ADMISSION_FORM_FIELDS = {
@@ -279,21 +329,34 @@ const DEFAULT_ADMISSION_FORM_FIELDS = {
   customFields: [],
   requiredFields: Object.fromEntries(ADMISSION_REQUIRED_DEFAULT.map((k) => [k, true])),
 };
+const DEFAULT_CREATE_LEAD_FORM_FIELDS = {
+  parentName: true, parentMobile: true, parentEmail: true, parentCity: true,
+  preferredLanguage: true, studentName: true, dateOfBirth: true, gender: true,
+  currentClass: true, boardUniversity: true, marksPercentage: true,
+  institution: true, course: true, academicYear: true, preferredCounselingMode: true, notes: true,
+  customFields: [],
+  requiredFields: {}, // Respect admin settings - no fields forced required by default
+};
 router.get('/form-fields', asyncHandler(async (req, res) => {
-  let admissionFormFields = { ...DEFAULT_ADMISSION_FORM_FIELDS };
+  const isCreateLead = req.query.form === 'createLead';
+  const settingKey = isCreateLead ? 'createLeadFormFields' : 'admissionFormFields';
+  const defaultFields = isCreateLead ? { ...DEFAULT_CREATE_LEAD_FORM_FIELDS } : { ...DEFAULT_ADMISSION_FORM_FIELDS };
+  const responseKey = isCreateLead ? 'createLeadFormFields' : 'admissionFormFields';
+
+  let formFields = { ...defaultFields };
   try {
     const rows = await prisma.$queryRaw(Prisma.sql`
-      SELECT "value" FROM "app_settings" WHERE "key" = 'admissionFormFields' LIMIT 1
+      SELECT "value" FROM "app_settings" WHERE "key" = ${settingKey} LIMIT 1
     `);
     const row = Array.isArray(rows) ? rows[0] : null;
     const value = row?.value;
     if (value && typeof value === 'object') {
-      admissionFormFields = { ...DEFAULT_ADMISSION_FORM_FIELDS, ...value };
+      formFields = { ...defaultFields, ...value };
     }
   } catch (err) {
     // Table may not exist yet
   }
-  res.json({ success: true, data: { admissionFormFields } });
+  res.json({ success: true, data: { [responseKey]: formFields } });
 }));
 
 // @route   GET /api/leads/export-template
@@ -307,19 +370,25 @@ router.get(
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet('Leads Template');
 
-    // Required: studentName, parentName, parentPhone, institution, course
-    // Optional: parentEmail, studentGrade, preferredLanguage, location, notes
+    // Template columns (match lead import format – import accepts these via aliases)
     worksheet.columns = [
-      { header: 'studentName', key: 'studentName', width: 25 },
-      { header: 'parentName', key: 'parentName', width: 25 },
-      { header: 'parentPhone', key: 'parentPhone', width: 18 },
-      { header: 'institution', key: 'institution', width: 30 },
-      { header: 'course', key: 'course', width: 30 },
-      { header: 'parentEmail', key: 'parentEmail', width: 30 },
-      { header: 'studentGrade', key: 'studentGrade', width: 18 },
-      { header: 'preferredLanguage', key: 'preferredLanguage', width: 20 },
-      { header: 'location', key: 'location', width: 20 },
-      { header: 'notes', key: 'notes', width: 30 },
+      { header: 'student_name', key: 'student_name', width: 25 },
+      { header: 'parent_name', key: 'parent_name', width: 25 },
+      { header: 'parent_mobile', key: 'parent_mobile', width: 18 },
+      { header: 'parent_email', key: 'parent_email', width: 30 },
+      { header: 'parent_city', key: 'parent_city', width: 20 },
+      { header: 'preferred_language', key: 'preferred_language', width: 20 },
+      { header: 'date_of_birth', key: 'date_of_birth', width: 14 },
+      { header: 'gender', key: 'gender', width: 12 },
+      { header: 'current_class', key: 'current_class', width: 18 },
+      { header: 'board_university', key: 'board_university', width: 22 },
+      { header: 'marks_percentage', key: 'marks_percentage', width: 18 },
+      { header: 'institution_name', key: 'institution_name', width: 30 },
+      { header: 'course_name', key: 'course_name', width: 30 },
+      { header: 'academic_year', key: 'academic_year', width: 16 },
+      { header: 'preferred_counseling_mode', key: 'preferred_counseling_mode', width: 24 },
+      { header: 'classification', key: 'classification', width: 22 },
+      { header: 'priority', key: 'priority', width: 14 },
     ];
 
     // Style header row
@@ -454,11 +523,12 @@ router.post(
 // @desc    Get all leads (Admin only)
 // @access  Private (Admin)
 router.get('/', authenticate, authorize('ADMIN'), [
-  query('classification').optional().isIn(['RAW', 'VERIFIED', 'PRIORITY']),
+  query('classification').optional().isIn(['NEW', 'COUNSELING_IN_PROGRESS', 'PRIORITY', 'ADMISSION_CONFIRMED']),
   query('priority').optional().isIn(['LOW', 'NORMAL', 'HIGH', 'URGENT']),
-  query('status').optional().isIn(['NEW', 'CONTACTED', 'FOLLOW_UP', 'ENROLLED', 'REJECTED', 'ON_HOLD']),
+  query('status').optional().isIn(['NEW', 'CONTACTED', 'FOLLOW_UP', 'ENROLLED', 'REJECTED', 'ON_HOLD', 'CALL_NOT_CONNECTED']),
   query('assigned').optional().isIn(['true', 'false']),
   query('autoAssigned').optional().isIn(['true', 'false']),
+  query('source').optional().isIn([...VALID_SOURCES, 'unknown']),
   query('page').optional().isInt({ min: 1 }),
   query('limit').optional().isInt({ min: 1, max: 100 })
 ], asyncHandler(async (req, res) => {
@@ -468,6 +538,7 @@ router.get('/', authenticate, authorize('ADMIN'), [
     status,
     assigned,
     autoAssigned,
+    source,
     page = 1,
     limit = 20,
     search
@@ -482,6 +553,7 @@ router.get('/', authenticate, authorize('ADMIN'), [
   if (assigned === 'false') where.assignedCounselorId = null;
   if (autoAssigned === 'true') where.autoAssigned = true;
   if (autoAssigned === 'false') where.autoAssigned = false;
+  if (source) where.source = source === 'unknown' ? null : source;
 
   if (search) {
     // Optimize: Prioritize direct field searches (faster) over relation searches
@@ -500,41 +572,57 @@ router.get('/', authenticate, authorize('ADMIN'), [
 
   const skip = (parseInt(page) - 1) * parseInt(limit);
 
-  // Optimize: Use select to fetch only needed fields, reduce data transfer
-  const [leads, total] = await Promise.all([
-    prisma.lead.findMany({
-      where,
-      select: {
-        id: true,
-        leadId: true,
-        studentName: true,
-        parentName: true,
-        parentMobile: true,
-        parentEmail: true,
-        currentClass: true,
-        status: true,
-        classification: true,
-        priority: true,
-        autoAssigned: true,
-        submittedAt: true,
-        importedCourseName: true,
-        institution: {
-          select: { name: true, type: true }
-        },
-        course: {
-          select: { name: true, code: true }
-        },
-        assignedCounselor: {
-          select: { fullName: true, mobile: true }
-          // Removed expertise and languages - not displayed in list view
-        }
-      },
-      orderBy: { submittedAt: 'desc' },
-      skip,
-      take: parseInt(limit)
-    }),
-    prisma.lead.count({ where })
-  ]);
+  const selectWithSource = {
+    id: true,
+    leadId: true,
+    studentName: true,
+    parentName: true,
+    parentMobile: true,
+    parentEmail: true,
+    currentClass: true,
+    status: true,
+    classification: true,
+    priority: true,
+    autoAssigned: true,
+    assignmentReason: true,
+    submittedAt: true,
+    importedCourseName: true,
+    source: true,
+    institution: { select: { name: true, type: true } },
+    course: { select: { name: true, code: true } },
+    assignedCounselor: { select: { fullName: true, mobile: true } },
+  };
+  const selectWithoutSource = { ...selectWithSource };
+  delete selectWithoutSource.source;
+
+  let leads;
+  let total;
+  try {
+    [leads, total] = await Promise.all([
+      prisma.lead.findMany({
+        where,
+        select: selectWithSource,
+        orderBy: { submittedAt: 'desc' },
+        skip,
+        take: parseInt(limit),
+      }),
+      prisma.lead.count({ where }),
+    ]);
+  } catch (err) {
+    // Retry without source (column may not exist if migration not applied)
+    const whereWithoutSource = { ...where };
+    delete whereWithoutSource.source;
+    [leads, total] = await Promise.all([
+      prisma.lead.findMany({
+        where: whereWithoutSource,
+        select: selectWithoutSource,
+        orderBy: { submittedAt: 'desc' },
+        skip,
+        take: parseInt(limit),
+      }),
+      prisma.lead.count({ where: whereWithoutSource }),
+    ]);
+  }
 
   const totalPages = Math.ceil(total / parseInt(limit));
   res.json({
@@ -750,9 +838,212 @@ router.get('/search', authenticate, authorize('ADMIN'), [
   });
 }));
 
-// @route   GET /api/leads/:id
-// @desc    Get single lead
+// @route   GET /api/leads/by-lead-id/:leadId
+// @desc    Get lead by unique leadId (e.g. LEAD-20260213-0001) for Voice Call wizard
 // @access  Private (Admin or assigned Counselor)
+router.get('/by-lead-id/:leadId', authenticate, asyncHandler(async (req, res) => {
+  const leadIdParam = req.params.leadId?.trim();
+  if (!leadIdParam) {
+    return res.status(400).json({ success: false, message: 'Lead ID is required' });
+  }
+  const lead = await prisma.lead.findUnique({
+    where: { leadId: leadIdParam },
+    include: {
+      institution: { select: { id: true, name: true, type: true } },
+      course: { select: { id: true, name: true, code: true, description: true } },
+      assignedCounselor: { select: { id: true, fullName: true, mobile: true, expertise: true, languages: true } }
+    }
+  });
+  if (!lead) {
+    return res.status(404).json({ success: false, message: 'Lead not found with this Lead ID' });
+  }
+  if (req.user.role === 'COUNSELOR') {
+    const counselorProfile = await prisma.counselorProfile.findUnique({
+      where: { userId: req.userId }
+    });
+    if (!counselorProfile || lead.assignedCounselorId !== counselorProfile.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. This lead is not assigned to you.'
+      });
+    }
+  }
+  res.json({ success: true, data: { lead } });
+}));
+
+// @route   GET /api/leads/call-dispositions (must be before /:id)
+// @desc    Get call dispositions for lead call modal (Counselor)
+// @access  Private (Counselor)
+router.get('/call-dispositions', authenticate, asyncHandler(async (req, res) => {
+  const dispositions = await prisma.callDisposition.findMany({
+    where: { isActive: true },
+    orderBy: { sortOrder: 'asc' },
+    select: { id: true, name: true, sortOrder: true },
+  });
+  res.json({ success: true, data: dispositions });
+}));
+
+// @route   GET /api/leads/available-counselors (must be before /:id)
+// @desc    Get available counselors for reassignment / assignment (Admin only)
+// @access  Private (Admin)
+router.get('/available-counselors', authenticate, authorize('ADMIN'), asyncHandler(async (req, res) => {
+  const { language, expertise, excludeCounselorId } = req.query;
+
+  const where = {
+    availability: 'ACTIVE'
+  };
+
+  if (excludeCounselorId) {
+    where.id = { not: excludeCounselorId };
+  }
+
+  let counselors = await prisma.counselorProfile.findMany({
+    where,
+    include: {
+      user: {
+        select: {
+          username: true,
+          email: true
+        }
+      },
+      school: {
+        select: {
+          name: true
+        }
+      },
+      presence: {
+        select: {
+          status: true,
+          lastActivityAt: true
+        }
+      },
+      assignedLeads: {
+        select: {
+          id: true
+        }
+      }
+    },
+    orderBy: [
+      { currentLoad: 'asc' },
+      { availability: 'asc' }
+    ]
+  });
+
+  if (language) {
+    const normalizedLanguage = language.trim().toLowerCase();
+    counselors = counselors.filter(counselor => {
+      if (!counselor.languages || counselor.languages.length === 0) return false;
+      return counselor.languages.some(lang =>
+        lang && lang.trim().toLowerCase() === normalizedLanguage
+      );
+    });
+  }
+
+  if (expertise) {
+    const normalizedExpertise = expertise.trim().toLowerCase();
+    counselors = counselors.filter(counselor => {
+      if (!counselor.expertise || counselor.expertise.length === 0) return false;
+      return counselor.expertise.some(exp =>
+        exp && exp.trim().toLowerCase() === normalizedExpertise
+      );
+    });
+  }
+
+  const formattedCounselors = counselors.map(counselor => ({
+    id: counselor.id,
+    fullName: counselor.fullName,
+    email: counselor.user?.email,
+    mobile: counselor.mobile,
+    expertise: counselor.expertise || [],
+    languages: counselor.languages || [],
+    availability: counselor.availability,
+    presenceStatus: counselor.presence?.status || 'OFFLINE',
+    currentLoad: counselor.currentLoad || 0,
+    maxCapacity: counselor.maxCapacity || 50,
+    loadPercentage: (counselor.maxCapacity || 50) > 0
+      ? Math.round(((counselor.currentLoad || 0) / (counselor.maxCapacity || 50)) * 100)
+      : 0,
+    school: counselor.school?.name || null,
+    assignedLeads: counselor.assignedLeads?.length || 0,
+    lastActivity: counselor.presence?.lastActivityAt || null
+  }));
+
+  res.json({
+    success: true,
+    data: { counselors: formattedCounselors }
+  });
+}));
+
+// @route   POST /api/leads/:id/call
+// @desc    Log a lead call (call start/end, disposition, notes) - Counselor only
+// @access  Private (assigned Counselor)
+router.post('/:id/call', authenticate, asyncHandler(async (req, res) => {
+  const { callStartTime, callEndTime, dispositionId, notes } = req.body;
+  const leadId = req.params.id;
+
+  const lead = await prisma.lead.findUnique({ where: { id: leadId } });
+  if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
+
+  const counselorProfile = await prisma.counselorProfile.findUnique({
+    where: { userId: req.userId },
+  });
+  if (!counselorProfile || lead.assignedCounselorId !== counselorProfile.id) {
+    return res.status(403).json({ success: false, message: 'Access denied. You can only log calls for leads assigned to you.' });
+  }
+
+  const errors = [];
+  if (!callStartTime) errors.push({ field: 'callStartTime', message: 'Call start time is required' });
+  if (!callEndTime) errors.push({ field: 'callEndTime', message: 'Call end time is required' });
+  if (!dispositionId || !String(dispositionId).trim()) errors.push({ field: 'dispositionId', message: 'Call disposition is required' });
+  if (!notes || !String(notes).trim()) errors.push({ field: 'notes', message: 'Call notes are required' });
+
+  if (errors.length > 0) {
+    return res.status(400).json({
+      success: false,
+      message: 'Validation failed',
+      errors,
+    });
+  }
+
+  const startDate = new Date(callStartTime);
+  const endDate = new Date(callEndTime);
+  if (isNaN(startDate.getTime())) errors.push({ field: 'callStartTime', message: 'Invalid call start time' });
+  if (isNaN(endDate.getTime())) errors.push({ field: 'callEndTime', message: 'Invalid call end time' });
+  if (endDate < startDate) errors.push({ field: 'callEndTime', message: 'Call end time must be after start time' });
+
+  const disposition = await prisma.callDisposition.findUnique({
+    where: { id: dispositionId, isActive: true },
+  });
+  if (!disposition) {
+    return res.status(400).json({ success: false, message: 'Invalid call disposition' });
+  }
+
+  if (errors.length > 0) {
+    return res.status(400).json({ success: false, message: 'Validation failed', errors });
+  }
+
+  const leadCall = await prisma.leadCall.create({
+    data: {
+      leadId,
+      counselorId: counselorProfile.id,
+      callStartTime: startDate,
+      callEndTime: endDate,
+      dispositionId: disposition.id,
+      notes: String(notes).trim(),
+    },
+    include: {
+      disposition: { select: { id: true, name: true } },
+    },
+  });
+
+  res.status(201).json({
+    success: true,
+    message: 'Call logged successfully',
+    data: { leadCall },
+  });
+}));
+
+// @route   GET /api/leads/:id - must be after /call-dispositions and /:id/call
 router.get('/:id', authenticate, asyncHandler(async (req, res) => {
   const lead = await prisma.lead.findUnique({
     where: { id: req.params.id },
@@ -855,11 +1146,26 @@ router.put('/:id', authenticate, asyncHandler(async (req, res) => {
         message: 'Access denied'
       });
     }
-    // Counselors can only update status and notes
-    const allowedFields = ['status', 'notes'];
+    // Counselors can update limited fields: status, notes and classification
+    // (used for marking Admission Confirmed from counseling workflow).
     updateData = {};
     if (req.body.status) updateData.status = req.body.status;
     if (req.body.notes !== undefined) updateData.notes = req.body.notes;
+    if (req.body.classification) updateData.classification = req.body.classification;
+
+    // Stage movement check: moving to CONTACTED or FOLLOW_UP requires at least one call with disposition
+    const statusesRequiringCall = ['CONTACTED', 'FOLLOW_UP'];
+    if (updateData.status && statusesRequiringCall.includes(updateData.status) && lead.status === 'NEW') {
+      const callCount = await prisma.leadCall.count({
+        where: { leadId: lead.id },
+      });
+      if (callCount === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Cannot move to this stage without logging a call. Please log a call with disposition first using the Call button.',
+        });
+      }
+    }
   }
 
   // Map frontend field names to database field names
@@ -932,103 +1238,6 @@ router.put('/:id', authenticate, asyncHandler(async (req, res) => {
     success: true,
     message: 'Lead updated successfully',
     data: { lead: updatedLead }
-  });
-}));
-
-// @route   GET /api/leads/available-counselors
-// @desc    Get available counselors for manual assignment (Admin only)
-// @access  Private (Admin)
-router.get('/available-counselors', authenticate, authorize('ADMIN'), asyncHandler(async (req, res) => {
-  const { language, expertise, excludeCounselorId } = req.query;
-  
-  const where = {
-    availability: 'ACTIVE' // Only show active counselors
-  };
-
-  // Exclude specific counselor if provided
-  if (excludeCounselorId) {
-    where.id = { not: excludeCounselorId };
-  }
-
-  // Get all active counselors first, then filter by language/expertise in memory
-  // This allows case-insensitive matching
-  let counselors = await prisma.counselorProfile.findMany({
-    where,
-    include: {
-      user: {
-        select: {
-          username: true,
-          email: true
-        }
-      },
-      school: {
-        select: {
-          name: true
-        }
-      },
-      presence: {
-        select: {
-          status: true,
-          lastActivityAt: true
-        }
-      },
-      assignedLeads: {
-        select: {
-          id: true
-        }
-      }
-    },
-    orderBy: [
-      { currentLoad: 'asc' },
-      { availability: 'asc' }
-    ]
-  });
-
-  // Filter by language (case-insensitive)
-  if (language) {
-    const normalizedLanguage = language.trim().toLowerCase();
-    counselors = counselors.filter(counselor => {
-      if (!counselor.languages || counselor.languages.length === 0) return false;
-      return counselor.languages.some(lang => 
-        lang && lang.trim().toLowerCase() === normalizedLanguage
-      );
-    });
-  }
-
-  // Filter by expertise (case-insensitive)
-  if (expertise) {
-    const normalizedExpertise = expertise.trim().toLowerCase();
-    counselors = counselors.filter(counselor => {
-      if (!counselor.expertise || counselor.expertise.length === 0) return false;
-      return counselor.expertise.some(exp => 
-        exp && exp.trim().toLowerCase() === normalizedExpertise
-      );
-    });
-  }
-
-  // Format response with availability info
-  const formattedCounselors = counselors.map(counselor => ({
-    id: counselor.id,
-    fullName: counselor.fullName,
-    email: counselor.user.email,
-    mobile: counselor.mobile,
-    expertise: counselor.expertise || [],
-    languages: counselor.languages || [],
-    availability: counselor.availability,
-    presenceStatus: counselor.presence?.status || 'OFFLINE',
-    currentLoad: counselor.currentLoad || 0,
-    maxCapacity: counselor.maxCapacity || 50,
-    loadPercentage: (counselor.maxCapacity || 50) > 0 
-      ? Math.round(((counselor.currentLoad || 0) / (counselor.maxCapacity || 50)) * 100) 
-      : 0,
-    school: counselor.school?.name || null,
-    assignedLeads: counselor.assignedLeads?.length || 0,
-    lastActivity: counselor.presence?.lastActivityAt || null
-  }));
-
-  res.json({
-    success: true,
-    data: { counselors: formattedCounselors }
   });
 }));
 
@@ -1143,6 +1352,7 @@ router.post(
       inserted: 0,
       skipped: 0,
       validationErrors: [], // { row, missingFields } or { row, duplicate, message }
+      createdLeadIdsForAutoAssign: [], // leads created without counselor
     };
 
     // Duplicate key: same student name + parent name + phone + email (normalized, case-insensitive)
@@ -1220,6 +1430,10 @@ router.post(
       const notes = (getCellValue(row, 'notes', 'source') || '').trim() || null;
       const counselorEmailRaw = getCellValue(row, 'assignedcounseloremail', 'assigned_counselor_email', 'counselor_email');
       const counselorEmail = String(counselorEmailRaw || '').trim();
+      const classificationRaw = (getCellValue(row, 'classification') || '').trim().toUpperCase();
+      const priorityRaw = (getCellValue(row, 'priority') || '').trim().toUpperCase();
+      const classification = ['NEW', 'COUNSELING_IN_PROGRESS', 'PRIORITY', 'ADMISSION_CONFIRMED'].includes(classificationRaw) ? classificationRaw : 'NEW';
+      const priority = ['LOW', 'NORMAL', 'HIGH', 'URGENT'].includes(priorityRaw) ? priorityRaw : 'NORMAL';
 
       rowsToInsert.push({
         rowNumber,
@@ -1241,6 +1455,8 @@ router.post(
           preferredCounselingMode,
           notes,
           counselorEmail,
+          classification,
+          priority,
         },
       });
     });
@@ -1266,23 +1482,23 @@ router.post(
       });
     }
 
-    // Process inserts inside a transaction (CRM-style: no duplicate/validation blocks)
-    await prisma.$transaction(async (tx) => {
-      // Lead ID format: LEAD-YYYYMMDD-NNNN (daily sequence)
-      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-      const prefix = `LEAD-${dateStr}-`;
-      const todayLeads = await tx.lead.findMany({
-        where: { leadId: { startsWith: prefix } },
-        select: { leadId: true },
-      });
-      let maxSeq = 0;
-      for (const l of todayLeads) {
-        const num = parseInt(l.leadId?.slice(prefix.length) || '0', 10);
-        if (!isNaN(num)) maxSeq = Math.max(maxSeq, num);
-      }
-      let nextSequence = maxSeq + 1;
+    // Process inserts without a long interactive transaction to avoid
+    // "Transaction already closed / interactive transaction timeout" errors.
+    // Lead ID format: LEAD-YYYYMMDD-NNNN (daily sequence)
+    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const prefix = `LEAD-${dateStr}-`;
+    const todayLeads = await prisma.lead.findMany({
+      where: { leadId: { startsWith: prefix } },
+      select: { leadId: true },
+    });
+    let maxSeq = 0;
+    for (const l of todayLeads) {
+      const num = parseInt(l.leadId?.slice(prefix.length) || '0', 10);
+      if (!isNaN(num)) maxSeq = Math.max(maxSeq, num);
+    }
+    let nextSequence = maxSeq + 1;
 
-      for (const row of rowsToInsert) {
+    for (const row of rowsToInsert) {
         const {
           rowNumber,
           data: {
@@ -1303,11 +1519,13 @@ router.post(
             preferredCounselingMode,
             notes,
             counselorEmail,
+            classification = 'NEW',
+            priority = 'NORMAL',
           },
         } = row;
 
         // Resolve institution - flexible matching; if none in DB, skip row (only skip for no institution)
-        let institution = await tx.institution.findFirst({
+        let institution = await prisma.institution.findFirst({
           where: {
             name: { equals: institutionName, mode: 'insensitive' },
             isActive: true,
@@ -1317,7 +1535,7 @@ router.post(
           },
         });
         if (!institution) {
-          const allInstitutions = await tx.institution.findMany({
+          const allInstitutions = await prisma.institution.findMany({
             where: { isActive: true },
             include: { courses: { where: { isActive: true } } },
           });
@@ -1329,7 +1547,7 @@ router.post(
           );
         }
         if (!institution) {
-          institution = await tx.institution.findFirst({
+          institution = await prisma.institution.findFirst({
             where: { isActive: true },
             include: { courses: { where: { isActive: true } } },
             orderBy: { name: 'asc' },
@@ -1361,7 +1579,7 @@ router.post(
         const counselorEmailStr = String(counselorEmail || '').trim();
         if (counselorEmailStr && counselorEmailStr !== '[object Object]' && counselorEmailStr.includes('@')) {
           try {
-            const counselorUser = await tx.user.findUnique({
+            const counselorUser = await prisma.user.findUnique({
               where: { email: counselorEmailStr },
               include: { counselorProfile: true },
             });
@@ -1399,6 +1617,8 @@ router.post(
         const leadId = `LEAD-${dateStr}-${String(nextSequence).padStart(4, '0')}`;
         nextSequence += 1;
 
+        const normalizedClassification = ['NEW', 'COUNSELING_IN_PROGRESS', 'PRIORITY', 'ADMISSION_CONFIRMED'].includes(classification) ? classification : 'NEW';
+        const normalizedPriority = ['LOW', 'NORMAL', 'HIGH', 'URGENT'].includes(priority) ? priority : 'NORMAL';
         const createData = {
           leadId,
           parentName,
@@ -1415,9 +1635,12 @@ router.post(
           institutionId: institution.id,
           academicYear: academicYear || '',
           notes,
+          // Treat admin imports as manual/CRM entry so they appear correctly in
+          // the "Manual Entry" slice of the Leads Distribution by Source chart.
+          source: 'manual_entry',
           consent: true,
-          classification: 'RAW',
-          priority: 'NORMAL',
+          classification: normalizedClassification,
+          priority: normalizedPriority,
           status: 'NEW',
           autoAssigned: !!counselorProfileId,
           assignedCounselorId: counselorProfileId,
@@ -1426,12 +1649,26 @@ router.post(
         if (importedCourseName) createData.importedCourseName = importedCourseName;
         if (normalizedMode) createData.preferredCounselingMode = normalizedMode;
 
-        await tx.lead.create({ data: createData });
+        const lead = await prisma.lead.create({ data: createData });
         results.inserted += 1;
+        if (!counselorProfileId) {
+          results.createdLeadIdsForAutoAssign.push(lead.id);
+        }
       }
-    });
 
     results.skipped = Math.max(0, results.totalRows - results.inserted);
+
+    // Auto-assign leads to counselors (same logic as Add Lead form)
+    for (const leadId of results.createdLeadIdsForAutoAssign || []) {
+      try {
+        const lead = await prisma.lead.findUnique({ where: { id: leadId } });
+        if (lead && !lead.assignedCounselorId) {
+          await autoAssignNewLead(lead);
+        }
+      } catch (err) {
+        console.error('[Lead Import] Auto-assign failed for lead', leadId, err.message);
+      }
+    }
 
     return res.json({
       success: true,
@@ -1503,15 +1740,108 @@ router.post('/:id/assign', authenticate, authorize('ADMIN'), [
   });
 }));
 
+// @route   POST /api/leads/:id/auto-assign
+// @desc    Auto-assign (or re-run auto assignment) based on configured algorithm
+// @access  Private (Admin)
+router.post('/:id/auto-assign', authenticate, authorize('ADMIN'), asyncHandler(async (req, res) => {
+  const lead = await prisma.lead.findUnique({ where: { id: req.params.id } });
+  if (!lead) {
+    return res.status(404).json({ success: false, message: 'Lead not found' });
+  }
+
+  const assignmentResult = await findCounselorForNewLead(lead);
+  const updated = await assignmentEngine.assignLead(lead, assignmentResult);
+
+  await prisma.activityLog.create({
+    data: {
+      userId: req.userId,
+      action: 'AUTO_ASSIGN_LEAD',
+      entityType: 'LEAD',
+      entityId: lead.id,
+      details: {
+        mode: 'configured',
+        assignmentReason: assignmentResult?.assignmentReason,
+        counselorId: updated?.assignedCounselorId || null,
+      },
+    },
+  });
+
+  const updatedLead = await prisma.lead.findUnique({
+    where: { id: req.params.id },
+    include: {
+      assignedCounselor: { select: { fullName: true, mobile: true, expertise: true } },
+      institution: { select: { name: true, type: true } },
+      course: { select: { name: true, code: true } },
+    },
+  });
+
+  res.json({
+    success: true,
+    message: updatedLead?.assignedCounselorId ? 'Lead auto-assigned' : 'No eligible counselor found for auto-assignment',
+    data: {
+      lead: updatedLead,
+      assignmentReason: assignmentResult?.assignmentReason || null,
+      needsManualAssignment: !!assignmentResult?.needsManualAssignment || !updatedLead?.assignedCounselorId,
+    },
+  });
+}));
+
+// @route   POST /api/leads/:id/auto-assign-round-robin
+// @desc    Auto-assign specifically using round-robin (used from Released Appointments)
+// @access  Private (Admin, Management)
+router.post('/:id/auto-assign-round-robin', authenticate, authorize(['ADMIN', 'MANAGEMENT']), asyncHandler(async (req, res) => {
+  const lead = await prisma.lead.findUnique({ where: { id: req.params.id } });
+  if (!lead) {
+    return res.status(404).json({ success: false, message: 'Lead not found' });
+  }
+
+  const assignmentResult = await findRoundRobinCounselor(lead);
+  const updated = await assignmentEngine.assignLead(lead, assignmentResult);
+
+  await prisma.activityLog.create({
+    data: {
+      userId: req.userId,
+      action: 'AUTO_ASSIGN_LEAD',
+      entityType: 'LEAD',
+      entityId: lead.id,
+      details: {
+        mode: 'round_robin',
+        assignmentReason: assignmentResult?.assignmentReason,
+        counselorId: updated?.assignedCounselorId || null,
+      },
+    },
+  });
+
+  const updatedLead = await prisma.lead.findUnique({
+    where: { id: req.params.id },
+    include: {
+      assignedCounselor: { select: { fullName: true, mobile: true, expertise: true } },
+      institution: { select: { name: true, type: true } },
+      course: { select: { name: true, code: true } },
+    },
+  });
+
+  res.json({
+    success: true,
+    message: updatedLead?.assignedCounselorId ? 'Lead auto-assigned (round robin)' : 'No eligible counselor found for round-robin auto-assignment',
+    data: {
+      lead: updatedLead,
+      assignmentReason: assignmentResult?.assignmentReason || null,
+      needsManualAssignment: !!assignmentResult?.needsManualAssignment || !updatedLead?.assignedCounselorId,
+    },
+  });
+}));
+
 // @route   GET /api/leads/stats/overview
 // @desc    Get lead statistics (Admin only)
 // @access  Private (Admin)
 router.get('/stats/overview', authenticate, authorize('ADMIN'), asyncHandler(async (req, res) => {
   const [
     totalLeads,
-    rawLeads,
-    verifiedLeads,
+    newClassificationLeads,
+    counselingInProgressLeads,
     priorityLeads,
+    admissionConfirmedLeads,
     autoAssigned,
     manuallyAssigned,
     unassigned,
@@ -1519,9 +1849,10 @@ router.get('/stats/overview', authenticate, authorize('ADMIN'), asyncHandler(asy
     enrolled
   ] = await Promise.all([
     prisma.lead.count(),
-    prisma.lead.count({ where: { classification: 'RAW' } }),
-    prisma.lead.count({ where: { classification: 'VERIFIED' } }),
+    prisma.lead.count({ where: { classification: 'NEW' } }),
+    prisma.lead.count({ where: { classification: 'COUNSELING_IN_PROGRESS' } }),
     prisma.lead.count({ where: { classification: 'PRIORITY' } }),
+    prisma.lead.count({ where: { classification: 'ADMISSION_CONFIRMED' } }),
     prisma.lead.count({ where: { autoAssigned: true } }),
     prisma.lead.count({ where: { autoAssigned: false, assignedCounselorId: { not: null } } }),
     prisma.lead.count({ where: { assignedCounselorId: null } }),
@@ -1543,9 +1874,10 @@ router.get('/stats/overview', authenticate, authorize('ADMIN'), asyncHandler(asy
     data: {
       total: totalLeads,
       classification: {
-        raw: rawLeads,
-        verified: verifiedLeads,
-        priority: priorityLeads
+        new: newClassificationLeads,
+        counselingInProgress: counselingInProgressLeads,
+        priority: priorityLeads,
+        admissionConfirmed: admissionConfirmedLeads
       },
       assignment: {
         auto: autoAssigned,

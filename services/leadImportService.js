@@ -6,9 +6,13 @@
 
 import ExcelJS from 'exceljs';
 import { prisma } from '../prisma/client.js';
+import assignmentEngine from './assignmentEngine.js';
 
 const REQUIRED_HEADERS = ['studentname', 'parentname', 'parentphone', 'institution', 'course'];
-const OPTIONAL_HEADERS = ['parentemail', 'studentgrade', 'preferredlanguage', 'location', 'notes'];
+const OPTIONAL_HEADERS = [
+  'parentemail', 'studentgrade', 'preferredlanguage', 'location', 'notes',
+  'dateofbirth', 'gender', 'boarduniversity', 'markspercentage', 'academicyear', 'preferredcounselingmode',
+];
 const ALLOWED_HEADERS = [...REQUIRED_HEADERS, ...OPTIONAL_HEADERS];
 
 const VALID_LANGUAGES = ['English', 'Hindi', 'Kannada', 'Telugu', 'Marathi', 'Tamil', 'Other'];
@@ -64,6 +68,12 @@ function headerDisplayName(normalized) {
     preferredlanguage: 'preferredLanguage',
     location: 'location',
     notes: 'notes',
+    dateofbirth: 'dateOfBirth',
+    gender: 'gender',
+    boarduniversity: 'boardUniversity',
+    markspercentage: 'marksPercentage',
+    academicyear: 'academicYear',
+    preferredcounselingmode: 'preferredCounselingMode',
   };
   return map[normalized] || normalized;
 }
@@ -79,6 +89,12 @@ const HEADER_ALIASES = {
   preferredlanguage: ['preferred_language', 'preferredlanguage'],
   location: ['location', 'parent_city', 'city'],
   notes: ['notes'],
+  dateofbirth: ['date_of_birth', 'dateofbirth'],
+  gender: ['gender'],
+  boarduniversity: ['board_university', 'boarduniversity'],
+  markspercentage: ['marks_percentage', 'markspercentage'],
+  academicyear: ['academic_year', 'academicyear'],
+  preferredcounselingmode: ['preferred_counseling_mode', 'preferredcounselingmode'],
 };
 
 function buildHeaderMap(rawHeaders) {
@@ -236,6 +252,14 @@ export async function previewImport(worksheet, headerMap) {
   };
 }
 
+function parseDateOfBirth(val) {
+  if (val == null || val === '') return null;
+  const s = String(val).trim();
+  if (!s) return null;
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 function getRowData(row, idx, headerMap) {
   const get = (key) => getCell(row, headerMap[key] || 0);
   const studentName = get('studentname');
@@ -248,7 +272,17 @@ function getRowData(row, idx, headerMap) {
   const preferredLanguage = get('preferredlanguage');
   const location = get('location');
   const notes = get('notes');
+  const dateOfBirthRaw = get('dateofbirth');
+  const genderRaw = get('gender');
+  const boardUniversity = get('boarduniversity');
+  const marksPercentageRaw = get('markspercentage');
+  const academicYear = get('academicyear');
+  const preferredCounselingModeRaw = get('preferredcounselingmode');
   const phone = normalizePhone(rawPhone);
+  const dateOfBirth = parseDateOfBirth(dateOfBirthRaw);
+  const gender = genderRaw?.trim();
+  const marksPercentage = marksPercentageRaw?.trim() ? parseFloat(marksPercentageRaw) : null;
+  const preferredCounselingMode = preferredCounselingModeRaw?.trim() || 'Online';
   return {
     rowNumber: idx,
     studentName: studentName?.trim() || '',
@@ -261,6 +295,12 @@ function getRowData(row, idx, headerMap) {
     preferredLanguage: preferredLanguage?.trim() || 'English',
     parentCity: location?.trim() || '',
     notes: notes?.trim() || null,
+    dateOfBirth: dateOfBirth || null,
+    gender: gender || 'Other',
+    boardUniversity: boardUniversity?.trim() || null,
+    marksPercentage: Number.isFinite(marksPercentage) ? marksPercentage : null,
+    academicYear: academicYear?.trim() || '',
+    preferredCounselingMode: preferredCounselingMode === 'Offline' ? 'Offline' : 'Online',
   };
 }
 
@@ -271,6 +311,7 @@ function getRowData(row, idx, headerMap) {
 export async function executeImport(worksheet, headerMap, duplicateDecisions = {}) {
   const errorReportRows = [];
   const rowsToProcess = [];
+  const createdLeadIds = [];
   let imported = 0;
   let skipped = 0;
   let updated = 0;
@@ -295,98 +336,138 @@ export async function executeImport(worksheet, headerMap, duplicateDecisions = {
     rowsToProcess.push(data);
   });
 
-  await prisma.$transaction(async (tx) => {
-    for (const data of rowsToProcess) {
-      const idx = data.rowNumber;
-      const dupDecision = duplicateDecisions[idx];
+  // Process rows sequentially without a long‑running interactive transaction to avoid
+  // "Transaction already closed / interactive transaction timeout" errors on bulk imports.
+  for (const data of rowsToProcess) {
+    const idx = data.rowNumber;
+    const dupDecision = duplicateDecisions[idx];
 
-      try {
-        const institution = await tx.institution.findFirst({
-          where: { name: { equals: data.institutionName, mode: 'insensitive' }, isActive: true },
-          include: { courses: { where: { isActive: true } } },
-        });
-        if (!institution) {
-          skipped += 1;
-          errorReportRows.push({ rowNumber: idx, errorType: 'Course/Institution', message: `Institution "${data.institutionName}" not found` });
-          continue;
-        }
-
-        const course = institution.courses.find((c) => c.name.toLowerCase() === data.courseName.toLowerCase());
-        if (!course) {
-          skipped += 1;
-          errorReportRows.push({ rowNumber: idx, errorType: 'Course/Institution', message: `Course "${data.courseName}" not found in institution "${data.institutionName}"` });
-          continue;
-        }
-
-        const existing = await tx.lead.findFirst({
-          where: {
-            parentMobile: data.parentMobile,
-            studentName: { equals: data.studentName, mode: 'insensitive' },
-            courseId: course.id,
-          },
-        });
-
-        if (existing) {
-          if (dupDecision === 'skip') {
-            skipped += 1;
-            errorReportRows.push({ rowNumber: idx, errorType: 'Duplicate', message: 'Skipped by user choice' });
-            continue;
-          }
-          if (dupDecision === 'update') {
-            await tx.lead.update({
-              where: { id: existing.id },
-              data: {
-                parentName: data.parentName,
-                parentEmail: data.parentEmail || existing.parentEmail,
-                currentClass: data.currentClass || existing.currentClass,
-                preferredLanguage: data.preferredLanguage || existing.preferredLanguage,
-                parentCity: data.parentCity || existing.parentCity,
-                notes: data.notes !== null && data.notes !== '' ? data.notes : existing.notes,
-              },
-            });
-            updated += 1;
-            continue;
-          }
-          if (dupDecision !== 'import_new') {
-            skipped += 1;
-            errorReportRows.push({ rowNumber: idx, errorType: 'Duplicate', message: 'Duplicate lead (no decision provided)' });
-            continue;
-          }
-        }
-
-        await tx.lead.create({
-          data: {
-            parentName: data.parentName,
-            parentMobile: data.parentMobile,
-            parentEmail: data.parentEmail || '',
-            parentCity: data.parentCity || '',
-            preferredLanguage: data.preferredLanguage || 'English',
-            studentName: data.studentName,
-            dateOfBirth: new Date('2000-01-01'),
-            gender: 'Other',
-            currentClass: data.currentClass || '',
-            boardUniversity: null,
-            marksPercentage: null,
-            institutionId: institution.id,
-            courseId: course.id,
-            academicYear: '',
-            preferredCounselingMode: 'Online',
-            notes: data.notes,
-            consent: true,
-            classification: 'RAW',
-            priority: 'NORMAL',
-            status: 'NEW',
-            autoAssigned: false,
-            assignedCounselorId: null,
-          },
-        });
-        imported += 1;
-      } catch (err) {
+    try {
+      const institution = await prisma.institution.findFirst({
+        where: { name: { equals: data.institutionName, mode: 'insensitive' }, isActive: true },
+        include: { courses: { where: { isActive: true } } },
+      });
+      if (!institution) {
         skipped += 1;
-        errorReportRows.push({ rowNumber: idx, errorType: 'System', message: err.message || String(err) });
+        errorReportRows.push({
+          rowNumber: idx,
+          errorType: 'Course/Institution',
+          message: `Institution "${data.institutionName}" not found`,
+        });
+        continue;
       }
+
+      const course = institution.courses.find((c) => c.name.toLowerCase() === data.courseName.toLowerCase());
+      if (!course) {
+        skipped += 1;
+        errorReportRows.push({
+          rowNumber: idx,
+          errorType: 'Course/Institution',
+          message: `Course "${data.courseName}" not found in institution "${data.institutionName}"`,
+        });
+        continue;
+      }
+
+      const existing = await prisma.lead.findFirst({
+        where: {
+          parentMobile: data.parentMobile,
+          studentName: { equals: data.studentName, mode: 'insensitive' },
+          courseId: course.id,
+        },
+      });
+
+      if (existing) {
+        if (dupDecision === 'skip') {
+          skipped += 1;
+          errorReportRows.push({
+            rowNumber: idx,
+            errorType: 'Duplicate',
+            message: 'Skipped by user choice',
+          });
+          continue;
+        }
+        if (dupDecision === 'update') {
+          await prisma.lead.update({
+            where: { id: existing.id },
+            data: {
+              parentName: data.parentName,
+              parentEmail: data.parentEmail ?? existing.parentEmail,
+              currentClass: data.currentClass || existing.currentClass,
+              preferredLanguage: data.preferredLanguage || existing.preferredLanguage,
+              parentCity: data.parentCity || existing.parentCity,
+              notes: data.notes !== null && data.notes !== '' ? data.notes : existing.notes,
+              dateOfBirth: data.dateOfBirth || existing.dateOfBirth,
+              gender: data.gender || existing.gender,
+              boardUniversity: data.boardUniversity ?? existing.boardUniversity,
+              marksPercentage: data.marksPercentage ?? existing.marksPercentage,
+              academicYear: data.academicYear || existing.academicYear,
+              preferredCounselingMode: data.preferredCounselingMode || existing.preferredCounselingMode,
+            },
+          });
+          updated += 1;
+          continue;
+        }
+        if (dupDecision !== 'import_new') {
+          skipped += 1;
+          errorReportRows.push({
+            rowNumber: idx,
+            errorType: 'Duplicate',
+            message: 'Duplicate lead (no decision provided)',
+          });
+          continue;
+        }
+      }
+
+      const lead = await prisma.lead.create({
+        data: {
+          parentName: data.parentName,
+          parentMobile: data.parentMobile,
+          parentEmail: data.parentEmail || '',
+          parentCity: data.parentCity || '',
+          preferredLanguage: data.preferredLanguage || 'English',
+          studentName: data.studentName,
+          dateOfBirth: data.dateOfBirth || new Date('2000-01-01'),
+          gender: data.gender || 'Other',
+          currentClass: data.currentClass || '',
+          boardUniversity: data.boardUniversity ?? null,
+          marksPercentage: data.marksPercentage ?? null,
+          institutionId: institution.id,
+          courseId: course.id,
+          academicYear: data.academicYear || '',
+          preferredCounselingMode: data.preferredCounselingMode || 'Online',
+          notes: data.notes,
+          consent: true,
+          classification: 'NEW',
+          priority: 'NORMAL',
+          status: 'NEW',
+          autoAssigned: false,
+          assignedCounselorId: null,
+        },
+      });
+      createdLeadIds.push(lead.id);
+      imported += 1;
+    } catch (err) {
+      skipped += 1;
+      errorReportRows.push({ rowNumber: idx, errorType: 'System', message: err.message || String(err) });
     }
-  });
+  }
+
+  // Auto-assign leads to counselors (same logic as Add Lead form)
+  for (const leadId of createdLeadIds) {
+    try {
+      const lead = await prisma.lead.findUnique({ where: { id: leadId } });
+      if (lead && !lead.assignedCounselorId) {
+        const result = await assignmentEngine.findBestCounselor(lead);
+        if (result?.counselor) {
+          await assignmentEngine.assignLead(lead, result);
+        } else {
+          console.warn('[Lead Import] No counselor available for auto-assign. Ensure at least one counselor has availability: ACTIVE.');
+        }
+      }
+    } catch (err) {
+      console.error('[Lead Import] Auto-assign failed for lead', leadId, err.message);
+    }
+  }
 
   return { imported, skipped, updated, errorReportRows };
 }

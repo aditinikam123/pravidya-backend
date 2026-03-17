@@ -59,17 +59,17 @@ npm run dev
 ```
 ✅ PostgreSQL Connected via Prisma
 ✅ Database connection verified
-Server running in development mode on port 5000
+Server running in development mode on port 8000
 ```
 
 ## Verify Installation
 
 1. **Check database connection:**
-   - Visit: `http://localhost:5000/api/health`
+   - Visit: `http://localhost:8000/api/health`
    - Should return: `{"success": true, "message": "Server is running"}`
 
 2. **Test API endpoints:**
-   - All routes are available at: `http://localhost:5000/api/*`
+   - All routes are available at: `http://localhost:8000/api/*`
 
 ## Troubleshooting
 
@@ -136,7 +136,7 @@ prisma validate
 
 2. **Test the API**:
    - Use Postman or curl to test endpoints
-   - Frontend should connect to `http://localhost:5000/api`
+   - Frontend should connect to `http://localhost:8000/api`
 
 3. **Monitor logs**:
    - Check console for any errors

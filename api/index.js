@@ -21,6 +21,7 @@ import trainingModuleRoutes from '../routes/trainingModules.js';
 import questionRoutes from '../routes/questions.js';
 import managementRoutes from '../routes/management.js';
 import externalRoutes from '../routes/external.js';
+import counselorVoiceCallRoutes from '../routes/counselorVoiceCall.js';
 
 import { errorHandler } from '../middleware/errorHandler.js';
 
@@ -60,6 +61,7 @@ app.use('/api/training-modules', trainingModuleRoutes);
 app.use('/api/questions', questionRoutes);
 app.use('/api/management', managementRoutes);
 app.use('/api/external', externalRoutes);
+app.use('/api/counselors/voice-call', counselorVoiceCallRoutes);
 
 // 404
 app.use((req, res) => {
